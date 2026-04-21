@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Box,
   TextField,
@@ -16,9 +16,15 @@ import {
 import DeleteIcon from '@mui/icons-material/Delete';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import { ID_REGEX, isValidId, useStudentProject } from '../../studentProject';
+
+export interface WelcomeIdentity {
+  studentId: string;
+  projectId: string;
+}
 
 interface WelcomePageProps {
-  onInstructions: (instructionsUrl: string) => void;
+  onInstructions: (instructionsUrl: string, identity: WelcomeIdentity) => void;
 }
 
 // Helper function to get all local instructions from localStorage
@@ -35,25 +41,56 @@ const getLocalInstructionsList = (): string[] => {
 };
 
 export function WelcomePage({ onInstructions }: WelcomePageProps) {
+  const { studentId, projectId, update: updateStudentProject } = useStudentProject();
+
+  const [studentIdInput, setStudentIdInput] = useState(studentId ?? '');
+  const [projectIdInput, setProjectIdInput] = useState(projectId ?? '');
   const [instructionsUrl, setInstructionsUrl] = useState('');
   const [localInstructionsName, setLocalInstructionsName] = useState('');
   const [existingLocalInstructions, setExistingLocalInstructions] = useState<string[]>(() => getLocalInstructionsList());
   const [showExisting, setShowExisting] = useState(() => getLocalInstructionsList().length > 0);
 
+  const trimmedStudentId = studentIdInput.trim();
+  const trimmedProjectId = projectIdInput.trim();
+
+  const studentIdError = useMemo(() => {
+    if (!trimmedStudentId) return null;
+    return isValidId(trimmedStudentId) ? null : 'Use letters, digits, "_" or "-" (max 64 chars).';
+  }, [trimmedStudentId]);
+
+  const projectIdError = useMemo(() => {
+    if (!trimmedProjectId) return null;
+    return isValidId(trimmedProjectId) ? null : 'Use letters, digits, "_" or "-" (max 64 chars).';
+  }, [trimmedProjectId]);
+
+  const identityValid = isValidId(trimmedStudentId) && isValidId(trimmedProjectId);
+
+  const persistAndContinue = (instructionsRef: string) => {
+    if (!identityValid) return;
+    const identity: WelcomeIdentity = {
+      studentId: trimmedStudentId,
+      projectId: trimmedProjectId,
+    };
+    // Persist for non-React consumers (e.g. runScript) before navigation.
+    updateStudentProject({ studentId: identity.studentId, projectId: identity.projectId });
+    onInstructions(instructionsRef, identity);
+  };
+
   const handleSubmitUrl = () => {
-    if (instructionsUrl.trim()) {
-      onInstructions(instructionsUrl.trim());
-    }
+    const url = instructionsUrl.trim();
+    if (!url || !identityValid) return;
+    persistAndContinue(url);
   };
 
   const handleSubmitLocal = () => {
-    if (localInstructionsName.trim()) {
-      onInstructions(`local:${localInstructionsName.trim()}`);
-    }
+    const name = localInstructionsName.trim();
+    if (!name || !identityValid) return;
+    persistAndContinue(`local:${name}`);
   };
 
   const handleSelectExisting = (name: string) => {
-    onInstructions(`local:${name}`);
+    if (!identityValid) return;
+    persistAndContinue(`local:${name}`);
   };
 
   const handleDeleteLocal = (name: string, event: React.MouseEvent) => {
@@ -61,7 +98,6 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
     if (window.confirm(`Are you sure you want to delete the local instructions "${name}"?`)) {
       const localKey = `local_instructions_${name}`;
       localStorage.removeItem(localKey);
-      // Refresh the list
       const updated = getLocalInstructionsList();
       setExistingLocalInstructions(updated);
     }
@@ -79,6 +115,8 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
     }
   };
 
+  const idHelperRegexHint = `Pattern: ${ID_REGEX.source}`;
+
   return (
     <Box
       sx={{
@@ -89,6 +127,7 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
         justifyContent: 'center',
         backgroundColor: 'grey.50',
         p: 3,
+        overflow: 'auto',
       }}
     >
       <Paper
@@ -106,9 +145,52 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             Welcome to AI Research Coach
           </Typography>
           <Typography variant="body1" color="text.secondary">
-            Get started with instructions
+            Enter your identity, then choose instructions
           </Typography>
         </Box>
+
+        {/* Identity (required) */}
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mb: 3 }}>
+          <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
+            Identity (required):
+          </Typography>
+          <TextField
+            label="Student ID"
+            type="text"
+            value={studentIdInput}
+            onChange={(e) => setStudentIdInput(e.target.value)}
+            fullWidth
+            autoFocus
+            required
+            placeholder="e.g., jane-doe"
+            error={!!studentIdError}
+            helperText={studentIdError ?? idHelperRegexHint}
+          />
+          <TextField
+            label="Project ID"
+            type="text"
+            value={projectIdInput}
+            onChange={(e) => setProjectIdInput(e.target.value)}
+            fullWidth
+            required
+            placeholder="e.g., intro-2026"
+            error={!!projectIdError}
+            helperText={projectIdError ?? idHelperRegexHint}
+          />
+          {identityValid && (
+            <Box sx={{ textAlign: 'left' }}>
+              <Typography variant="caption" color="text.secondary" component="div">
+                project_dir: <code>../..</code> (resolves to the session directory for{' '}
+                <code>{trimmedStudentId}/{trimmedProjectId}</code>)
+              </Typography>
+              <Typography variant="caption" color="text.secondary" component="div">
+                student_repo: <code>https://github.com/{trimmedStudentId}/{trimmedProjectId}</code>
+              </Typography>
+            </Box>
+          )}
+        </Box>
+
+        <Divider sx={{ my: 3 }} />
 
         {/* Instructions URL Form */}
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mb: 3 }}>
@@ -122,7 +204,6 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             onChange={(e) => setInstructionsUrl(e.target.value)}
             onKeyPress={handleKeyPressUrl}
             fullWidth
-            autoFocus
             placeholder="https://example.com/instructions.md"
           />
 
@@ -130,7 +211,7 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             variant="contained"
             size="large"
             onClick={handleSubmitUrl}
-            disabled={!instructionsUrl.trim()}
+            disabled={!instructionsUrl.trim() || !identityValid}
           >
             Continue with URL
           </Button>
@@ -176,7 +257,10 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
                           </IconButton>
                         }
                       >
-                        <ListItemButton onClick={() => handleSelectExisting(name)}>
+                        <ListItemButton
+                          onClick={() => handleSelectExisting(name)}
+                          disabled={!identityValid}
+                        >
                           <ListItemText primary={name} />
                         </ListItemButton>
                       </ListItem>
@@ -201,11 +285,17 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             variant="outlined"
             size="large"
             onClick={handleSubmitLocal}
-            disabled={!localInstructionsName.trim()}
+            disabled={!localInstructionsName.trim() || !identityValid}
           >
             Continue with Local
           </Button>
         </Box>
+
+        {!identityValid && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
+            Enter a valid Student ID and Project ID above to enable the Continue buttons.
+          </Typography>
+        )}
       </Paper>
     </Box>
   );

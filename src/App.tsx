@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import AboutDialog from './components/About/AboutDialog';
 import { AIResearchCoachChatPanel } from './components/Chat/ChatPanel';
 import { MainLayout } from './components/Layout/MainLayout';
-import { WelcomePage } from './components/Welcome/WelcomePage';
+import { WelcomePage, type WelcomeIdentity } from './components/Welcome/WelcomePage';
 import logoIcon from '/logo-white.svg';
 import { useOutputs } from './outputs/useOutputs';
 import { OutputPanel } from './components/Outputs/OutputPanel';
@@ -159,17 +159,34 @@ function AppContent() {
 
   const { instructions, instructionsError, instructionsLoading, suggestionsEnabled, reloadInstructions } = useInstructions(instructionsUrl);
 
-  const handleInstructions = useCallback((url: string | null) => {
-    // set the query parameter without reloading the page
-    // Build the URL manually to avoid encoding
-    const newUrl = url
-      ? `${window.location.pathname}?instructions=${url}`
-      : window.location.pathname;
-    window.history.pushState({}, '', newUrl);
-    
-    // Trigger a popstate event to update the component
-    window.dispatchEvent(new PopStateEvent('popstate'));
-  }, []);
+  const handleInstructions = useCallback(
+    (url: string | null, identity?: WelcomeIdentity) => {
+      // set the query parameter without reloading the page
+      // Build the URL manually so the `instructions` value is not URL-encoded
+      // (existing convention; getInstructionsUrlFromQuery parses it raw).
+      let newUrl = window.location.pathname;
+      if (url) {
+        const parts = [`instructions=${url}`];
+        if (identity) {
+          // Scripts run in <workspaces>/<student_id>/<project_id>/tmp/<timestamp>/,
+          // so "../.." resolves to the per-session project directory regardless of
+          // whether the server is local or remote.
+          const projectDir = '../..';
+          const studentRepo = `https://github.com/${identity.studentId}/${identity.projectId}`;
+          parts.push(`student_id=${encodeURIComponent(identity.studentId)}`);
+          parts.push(`project_id=${encodeURIComponent(identity.projectId)}`);
+          parts.push(`project_dir=${encodeURIComponent(projectDir)}`);
+          parts.push(`student_repo=${encodeURIComponent(studentRepo)}`);
+        }
+        newUrl = `${newUrl}?${parts.join('&')}`;
+      }
+      window.history.pushState({}, '', newUrl);
+
+      // Trigger a popstate event to update the component
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    },
+    []
+  );
 
   const handleSaveLocalInstructions = useCallback((content: string) => {
     if (instructionsUrl?.startsWith('local:')) {

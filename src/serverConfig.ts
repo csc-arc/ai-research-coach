@@ -9,7 +9,10 @@
 const REMOTE_SERVER_URL = "https://airesearchcoach-server.airesearchcoach.org";
 const LOCAL_SERVER_URL = "http://localhost:3339";
 
-const DEFAULT_SERVER_URL = REMOTE_SERVER_URL;
+// Dev override: default to the local server so `npm run dev` talks to
+// http://localhost:3339 out of the box. Flip back to REMOTE_SERVER_URL before
+// shipping a production build.
+const DEFAULT_SERVER_URL = LOCAL_SERVER_URL;
 
 let currentServerUrl = DEFAULT_SERVER_URL;
 
