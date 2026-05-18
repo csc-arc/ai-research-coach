@@ -168,15 +168,9 @@ function AppContent() {
       if (url) {
         const parts = [`instructions=${url}`];
         if (identity) {
-          // Scripts run in <workspaces>/<student_id>/<project_id>/tmp/<timestamp>/,
-          // so "../.." resolves to the per-session project directory regardless of
-          // whether the server is local or remote.
-          const projectDir = '../..';
-          const studentRepo = `https://github.com/${identity.studentId}/${identity.projectId}`;
           parts.push(`student_id=${encodeURIComponent(identity.studentId)}`);
           parts.push(`project_id=${encodeURIComponent(identity.projectId)}`);
-          parts.push(`project_dir=${encodeURIComponent(projectDir)}`);
-          parts.push(`student_repo=${encodeURIComponent(studentRepo)}`);
+          parts.push(`pi=${encodeURIComponent(identity.pi)}`);
         }
         newUrl = `${newUrl}?${parts.join('&')}`;
       }

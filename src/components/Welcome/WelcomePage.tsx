@@ -1,40 +1,42 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Box,
-  TextField,
   Button,
-  Typography,
-  Paper,
+  CircularProgress,
+  Collapse,
   Divider,
+  IconButton,
   List,
   ListItem,
-  ListItemText,
   ListItemButton,
-  IconButton,
-  Collapse,
+  ListItemText,
+  Paper,
+  TextField,
+  Typography,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
-import { ID_REGEX, isValidId, useStudentProject } from '../../studentProject';
+import { isValidId, useStudentProject } from '../../studentProject';
+import { useProjects, type Project } from '../../useProjects';
 
 export interface WelcomeIdentity {
   studentId: string;
   projectId: string;
+  pi: string;
 }
 
 interface WelcomePageProps {
   onInstructions: (instructionsUrl: string, identity: WelcomeIdentity) => void;
 }
 
-// Helper function to get all local instructions from localStorage
 const getLocalInstructionsList = (): string[] => {
   const keys: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
     if (key && key.startsWith('local_instructions_')) {
-      const name = key.substring('local_instructions_'.length);
-      keys.push(name);
+      keys.push(key.substring('local_instructions_'.length));
     }
   }
   return keys.sort();
@@ -44,34 +46,40 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
   const { studentId, projectId, update: updateStudentProject } = useStudentProject();
 
   const [studentIdInput, setStudentIdInput] = useState(studentId ?? '');
-  const [projectIdInput, setProjectIdInput] = useState(projectId ?? '');
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [instructionsUrl, setInstructionsUrl] = useState('');
   const [localInstructionsName, setLocalInstructionsName] = useState('');
-  const [existingLocalInstructions, setExistingLocalInstructions] = useState<string[]>(() => getLocalInstructionsList());
+  const [existingLocalInstructions, setExistingLocalInstructions] = useState<string[]>(() =>
+    getLocalInstructionsList()
+  );
   const [showExisting, setShowExisting] = useState(() => getLocalInstructionsList().length > 0);
 
+  const projectsState = useProjects();
+
+  // Pre-select the previously-used project once the list loads
+  useEffect(() => {
+    if (projectsState.status === 'ok' && !selectedProject && projectId) {
+      const match = projectsState.projects.find((p) => p.slug === projectId);
+      if (match) setSelectedProject(match);
+    }
+  }, [projectsState, projectId, selectedProject]);
+
   const trimmedStudentId = studentIdInput.trim();
-  const trimmedProjectId = projectIdInput.trim();
 
   const studentIdError = useMemo(() => {
     if (!trimmedStudentId) return null;
     return isValidId(trimmedStudentId) ? null : 'Use letters, digits, "_" or "-" (max 64 chars).';
   }, [trimmedStudentId]);
 
-  const projectIdError = useMemo(() => {
-    if (!trimmedProjectId) return null;
-    return isValidId(trimmedProjectId) ? null : 'Use letters, digits, "_" or "-" (max 64 chars).';
-  }, [trimmedProjectId]);
-
-  const identityValid = isValidId(trimmedStudentId) && isValidId(trimmedProjectId);
+  const identityValid = isValidId(trimmedStudentId) && selectedProject !== null;
 
   const persistAndContinue = (instructionsRef: string) => {
-    if (!identityValid) return;
+    if (!identityValid || !selectedProject) return;
     const identity: WelcomeIdentity = {
       studentId: trimmedStudentId,
-      projectId: trimmedProjectId,
+      projectId: selectedProject.slug,
+      pi: selectedProject.pi,
     };
-    // Persist for non-React consumers (e.g. runScript) before navigation.
     updateStudentProject({ studentId: identity.studentId, projectId: identity.projectId });
     onInstructions(instructionsRef, identity);
   };
@@ -96,26 +104,19 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
   const handleDeleteLocal = (name: string, event: React.MouseEvent) => {
     event.stopPropagation();
     if (window.confirm(`Are you sure you want to delete the local instructions "${name}"?`)) {
-      const localKey = `local_instructions_${name}`;
-      localStorage.removeItem(localKey);
+      localStorage.removeItem(`local_instructions_${name}`);
       const updated = getLocalInstructionsList();
       setExistingLocalInstructions(updated);
     }
   };
 
   const handleKeyPressUrl = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleSubmitUrl();
-    }
+    if (e.key === 'Enter') handleSubmitUrl();
   };
 
   const handleKeyPressLocal = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleSubmitLocal();
-    }
+    if (e.key === 'Enter') handleSubmitLocal();
   };
-
-  const idHelperRegexHint = `Pattern: ${ID_REGEX.source}`;
 
   return (
     <Box
@@ -134,7 +135,7 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
         elevation={3}
         sx={{
           p: 4,
-          maxWidth: 500,
+          maxWidth: 520,
           width: '100%',
           textAlign: 'center',
         }}
@@ -154,39 +155,69 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
           <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
             Identity (required):
           </Typography>
+
           <TextField
-            label="Student ID"
+            label="Your GitHub username"
             type="text"
             value={studentIdInput}
             onChange={(e) => setStudentIdInput(e.target.value)}
             fullWidth
             autoFocus
             required
-            placeholder="e.g., jane-doe"
+            placeholder="your-github-username"
             error={!!studentIdError}
-            helperText={studentIdError ?? idHelperRegexHint}
+            helperText={studentIdError ?? ' '}
           />
-          <TextField
-            label="Project ID"
-            type="text"
-            value={projectIdInput}
-            onChange={(e) => setProjectIdInput(e.target.value)}
-            fullWidth
-            required
-            placeholder="e.g., intro-2026"
-            error={!!projectIdError}
-            helperText={projectIdError ?? idHelperRegexHint}
-          />
-          {identityValid && (
-            <Box sx={{ textAlign: 'left' }}>
-              <Typography variant="caption" color="text.secondary" component="div">
-                project_dir: <code>../..</code> (resolves to the session directory for{' '}
-                <code>{trimmedStudentId}/{trimmedProjectId}</code>)
-              </Typography>
-              <Typography variant="caption" color="text.secondary" component="div">
-                student_repo: <code>https://github.com/{trimmedStudentId}/{trimmedProjectId}</code>
+
+          {/* Project picker */}
+          <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left', mt: 1 }}>
+            Select a project:
+          </Typography>
+
+          {projectsState.status === 'loading' && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 1 }}>
+              <CircularProgress size={18} />
+              <Typography variant="body2" color="text.secondary">
+                Loading projects…
               </Typography>
             </Box>
+          )}
+
+          {projectsState.status === 'error' && (
+            <Alert severity="error" sx={{ textAlign: 'left' }}>
+              Could not load projects: {projectsState.message}
+            </Alert>
+          )}
+
+          {projectsState.status === 'ok' && projectsState.projects.length === 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'left' }}>
+              No projects found in the repository.
+            </Typography>
+          )}
+
+          {projectsState.status === 'ok' && projectsState.projects.length > 0 && (
+            <Paper variant="outlined">
+              <List dense disablePadding>
+                {projectsState.projects.map((project, idx) => (
+                  <Box key={project.slug}>
+                    {idx > 0 && <Divider />}
+                    <ListItemButton
+                      selected={selectedProject?.slug === project.slug}
+                      onClick={() => setSelectedProject(project)}
+                      sx={{ flexDirection: 'column', alignItems: 'flex-start', py: 1.5 }}
+                    >
+                      <Typography variant="body2" fontWeight={600}>
+                        {project.title}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        PI: {project.pi}
+                        {project.description ? ` — ${project.description}` : ''}
+                      </Typography>
+                    </ListItemButton>
+                  </Box>
+                ))}
+              </List>
+            </Paper>
           )}
         </Box>
 
@@ -229,7 +260,6 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             Use local instructions:
           </Typography>
 
-          {/* Existing Local Instructions */}
           {existingLocalInstructions.length > 0 && (
             <Box sx={{ mb: 2 }}>
               <Button
@@ -237,7 +267,8 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
                 endIcon={showExisting ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                 sx={{ mb: 1, textTransform: 'none' }}
               >
-                {showExisting ? 'Hide' : 'Show'} existing local instructions ({existingLocalInstructions.length})
+                {showExisting ? 'Hide' : 'Show'} existing local instructions (
+                {existingLocalInstructions.length})
               </Button>
               <Collapse in={showExisting}>
                 <Paper variant="outlined" sx={{ maxHeight: 200, overflow: 'auto' }}>
@@ -293,7 +324,7 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
 
         {!identityValid && (
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
-            Enter a valid Student ID and Project ID above to enable the Continue buttons.
+            Enter your GitHub username and select a project above to enable the Continue buttons.
           </Typography>
         )}
       </Paper>
