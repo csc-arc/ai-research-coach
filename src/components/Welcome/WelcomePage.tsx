@@ -21,6 +21,9 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { isValidId, useStudentProject } from '../../studentProject';
 import { useProjects, type Project } from '../../useProjects';
 
+const DEFAULT_INSTRUCTIONS_URL =
+  'https://github.com/csc-arc/ai-research-coach/blob/main/public/instructions.md';
+
 export interface WelcomeIdentity {
   studentId: string;
   projectId: string;
@@ -52,7 +55,7 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
   const [existingLocalInstructions, setExistingLocalInstructions] = useState<string[]>(() =>
     getLocalInstructionsList()
   );
-  const [showExisting, setShowExisting] = useState(() => getLocalInstructionsList().length > 0);
+  const [showExisting, setShowExisting] = useState(false);
 
   const projectsState = useProjects();
 
@@ -146,7 +149,7 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             Welcome to AI Research Coach
           </Typography>
           <Typography variant="body1" color="text.secondary">
-            Enter your identity, then choose instructions
+            Enter your GitHub username and select a project to begin.
           </Typography>
         </Box>
 
@@ -221,112 +224,114 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
           )}
         </Box>
 
-        <Divider sx={{ my: 3 }} />
-
-        {/* Instructions URL Form */}
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mb: 3 }}>
-          <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
-            Use remote instructions:
-          </Typography>
-          <TextField
-            label="Instructions URL"
-            type="text"
-            value={instructionsUrl}
-            onChange={(e) => setInstructionsUrl(e.target.value)}
-            onKeyPress={handleKeyPressUrl}
-            fullWidth
-            placeholder="https://example.com/instructions.md"
-          />
-
-          <Button
-            variant="contained"
-            size="large"
-            onClick={handleSubmitUrl}
-            disabled={!instructionsUrl.trim() || !identityValid}
-          >
-            Continue with URL
-          </Button>
-        </Box>
-
-        <Divider sx={{ my: 3 }}>
-          <Typography variant="body2" color="text.secondary">
-            OR
-          </Typography>
-        </Divider>
-
-        {/* Local Instructions Form */}
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 3 }}>
-          <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
-            Use local instructions:
-          </Typography>
-
-          {existingLocalInstructions.length > 0 && (
-            <Box sx={{ mb: 2 }}>
-              <Button
-                onClick={() => setShowExisting(!showExisting)}
-                endIcon={showExisting ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                sx={{ mb: 1, textTransform: 'none' }}
-              >
-                {showExisting ? 'Hide' : 'Show'} existing local instructions (
-                {existingLocalInstructions.length})
-              </Button>
-              <Collapse in={showExisting}>
-                <Paper variant="outlined" sx={{ maxHeight: 200, overflow: 'auto' }}>
-                  <List dense disablePadding>
-                    {existingLocalInstructions.map((name) => (
-                      <ListItem
-                        key={name}
-                        disablePadding
-                        secondaryAction={
-                          <IconButton
-                            edge="end"
-                            aria-label="delete"
-                            onClick={(e) => handleDeleteLocal(name, e)}
-                            size="small"
-                          >
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
-                        }
-                      >
-                        <ListItemButton
-                          onClick={() => handleSelectExisting(name)}
-                          disabled={!identityValid}
-                        >
-                          <ListItemText primary={name} />
-                        </ListItemButton>
-                      </ListItem>
-                    ))}
-                  </List>
-                </Paper>
-              </Collapse>
-            </Box>
-          )}
-
-          <TextField
-            label="Local Instructions Name"
-            type="text"
-            value={localInstructionsName}
-            onChange={(e) => setLocalInstructionsName(e.target.value)}
-            onKeyPress={handleKeyPressLocal}
-            fullWidth
-            placeholder="e.g., my-project"
-          />
-
-          <Button
-            variant="outlined"
-            size="large"
-            onClick={handleSubmitLocal}
-            disabled={!localInstructionsName.trim() || !identityValid}
-          >
-            Continue with Local
-          </Button>
-        </Box>
+        {/* Primary action */}
+        <Button
+          variant="contained"
+          size="large"
+          fullWidth
+          onClick={() => persistAndContinue(DEFAULT_INSTRUCTIONS_URL)}
+          disabled={!identityValid}
+          sx={{ mt: 1, mb: 2, py: 1.5 }}
+        >
+          Start Session
+        </Button>
 
         {!identityValid && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
-            Enter your GitHub username and select a project above to enable the Continue buttons.
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+            Enter your GitHub username and select a project to continue.
           </Typography>
         )}
+
+        {/* Developer options */}
+        <Divider sx={{ mt: 2 }}>
+          <Button
+            size="small"
+            onClick={() => setShowExisting(!showExisting)}
+            endIcon={showExisting ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            sx={{ textTransform: 'none', color: 'text.secondary', fontSize: '0.75rem' }}
+          >
+            Developer options
+          </Button>
+        </Divider>
+
+        <Collapse in={showExisting}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
+              Use a custom instructions URL:
+            </Typography>
+            <TextField
+              label="Instructions URL"
+              type="text"
+              value={instructionsUrl}
+              onChange={(e) => setInstructionsUrl(e.target.value)}
+              onKeyPress={handleKeyPressUrl}
+              fullWidth
+              placeholder="https://example.com/instructions.md"
+              size="small"
+            />
+            <Button
+              variant="outlined"
+              onClick={handleSubmitUrl}
+              disabled={!instructionsUrl.trim() || !identityValid}
+            >
+              Continue with URL
+            </Button>
+
+            <Divider />
+
+            <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
+              Use local instructions:
+            </Typography>
+
+            {existingLocalInstructions.length > 0 && (
+              <Paper variant="outlined" sx={{ maxHeight: 200, overflow: 'auto' }}>
+                <List dense disablePadding>
+                  {existingLocalInstructions.map((name) => (
+                    <ListItem
+                      key={name}
+                      disablePadding
+                      secondaryAction={
+                        <IconButton
+                          edge="end"
+                          aria-label="delete"
+                          onClick={(e) => handleDeleteLocal(name, e)}
+                          size="small"
+                        >
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      }
+                    >
+                      <ListItemButton
+                        onClick={() => handleSelectExisting(name)}
+                        disabled={!identityValid}
+                      >
+                        <ListItemText primary={name} />
+                      </ListItemButton>
+                    </ListItem>
+                  ))}
+                </List>
+              </Paper>
+            )}
+
+            <TextField
+              label="Local Instructions Name"
+              type="text"
+              value={localInstructionsName}
+              onChange={(e) => setLocalInstructionsName(e.target.value)}
+              onKeyPress={handleKeyPressLocal}
+              fullWidth
+              placeholder="e.g., my-project"
+              size="small"
+            />
+            <Button
+              variant="outlined"
+              onClick={handleSubmitLocal}
+              disabled={!localInstructionsName.trim() || !identityValid}
+            >
+              Continue with Local
+            </Button>
+          </Box>
+        </Collapse>
       </Paper>
     </Box>
   );
