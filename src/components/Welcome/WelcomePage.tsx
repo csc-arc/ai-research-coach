@@ -11,6 +11,7 @@ import {
   ListItem,
   ListItemButton,
   ListItemText,
+  ListSubheader,
   Paper,
   TextField,
   Typography,
@@ -66,6 +67,23 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
       if (match) setSelectedProject(match);
     }
   }, [projectsState, projectId, selectedProject]);
+
+  // Group projects by PI, sorted alphabetically by PI then by title
+  const projectsByPi = useMemo(() => {
+    if (projectsState.status !== 'ok') return [];
+    const map = new Map<string, typeof projectsState.projects>();
+    for (const project of projectsState.projects) {
+      const pi = project.pi || 'Unknown PI';
+      if (!map.has(pi)) map.set(pi, []);
+      map.get(pi)!.push(project);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([pi, projects]) => ({
+        pi,
+        projects: [...projects].sort((a, b) => a.title.localeCompare(b.title)),
+      }));
+  }, [projectsState]);
 
   const trimmedStudentId = studentIdInput.trim();
 
@@ -198,25 +216,44 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
             </Typography>
           )}
 
-          {projectsState.status === 'ok' && projectsState.projects.length > 0 && (
+          {projectsState.status === 'ok' && projectsByPi.length > 0 && (
             <Paper variant="outlined">
               <List dense disablePadding>
-                {projectsState.projects.map((project, idx) => (
-                  <Box key={project.slug}>
-                    {idx > 0 && <Divider />}
-                    <ListItemButton
-                      selected={selectedProject?.slug === project.slug}
-                      onClick={() => setSelectedProject(project)}
-                      sx={{ flexDirection: 'column', alignItems: 'flex-start', py: 1.5 }}
+                {projectsByPi.map(({ pi, projects }, groupIdx) => (
+                  <Box key={pi}>
+                    {groupIdx > 0 && <Divider />}
+                    <ListSubheader
+                      sx={{
+                        bgcolor: 'grey.100',
+                        lineHeight: '32px',
+                        fontWeight: 700,
+                        fontSize: '0.7rem',
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        color: 'text.secondary',
+                        borderBottom: '1px solid',
+                        borderColor: 'divider',
+                      }}
                     >
-                      <Typography variant="body2" fontWeight={600}>
-                        {project.title}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        PI: {project.pi}
-                        {project.description ? ` — ${project.description}` : ''}
-                      </Typography>
-                    </ListItemButton>
+                      PI — {pi}
+                    </ListSubheader>
+                    {projects.map((project, idx) => (
+                      <Box key={project.slug}>
+                        {idx > 0 && <Divider component="li" />}
+                        <ListItemButton
+                          selected={selectedProject?.slug === project.slug}
+                          onClick={() => setSelectedProject(project)}
+                          sx={{ py: 1.25, pl: 2.5 }}
+                        >
+                          <ListItemText
+                            primary={project.title}
+                            primaryTypographyProps={{ variant: 'body2', fontWeight: 600 }}
+                            secondary={project.description || null}
+                            secondaryTypographyProps={{ variant: 'caption' }}
+                          />
+                        </ListItemButton>
+                      </Box>
+                    ))}
                   </Box>
                 ))}
               </List>
