@@ -5,16 +5,18 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional, Union
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Mutable globals populated by run_server() / create_app()
 SERVER_PASSCODE: Optional[str] = None
 SERVER_WORKING_DIR: Optional[Path] = None
+OPENROUTER_API_KEY: Optional[str] = None
 
 # student_id and project_id must be safe path components.
 # Allow letters, digits, dash, underscore. Length 1..64.
@@ -27,6 +29,21 @@ DEFAULT_CORS_ORIGINS = [
 ]
 
 app = FastAPI(title="AI Research Coach Script Execution Server")
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool"]
+    content: Optional[Union[str, list]] = None
+    tool_calls: Optional[list] = None
+    tool_call_id: Optional[str] = None
+
+
+class CompletionProxyRequest(BaseModel):
+    model: str
+    systemMessage: str
+    messages: list[ChatMessage]
+    tools: list[dict] = []
+    passcode: str
 
 
 class RunScriptRequest(BaseModel):
@@ -289,6 +306,86 @@ async def serve_file(student_id: str, project_id: str, file_path: str, request: 
     return FileResponse(full_path)
 
 
+@app.post("/api/completion")
+async def completion_proxy(body: CompletionProxyRequest, http_request: Request):
+    """Stream LLM completions from OpenRouter, authenticated by passcode.
+
+    The server holds the OpenRouter API key; the browser never sees it.
+    Upstream errors are forwarded as HTTPExceptions so the client gets a
+    meaningful status code rather than a silent empty stream. Client
+    disconnects are detected mid-stream and the upstream connection is
+    closed to avoid burning credits on abandoned requests.
+
+    TODO(follow-up): parse the final SSE usage frame and log
+    prompt_tokens / completion_tokens per request for cost visibility.
+    """
+    if not validate_passcode(body.passcode):
+        raise HTTPException(status_code=403, detail="Invalid passcode")
+
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenRouter API key not configured on this server",
+        )
+
+    messages: list[dict] = [{"role": "system", "content": body.systemMessage}]
+    messages += [m.model_dump(exclude_none=True) for m in body.messages]
+
+    payload: dict = {
+        "model": body.model,
+        "messages": messages,
+        "stream": True,
+    }
+    if body.tools:
+        payload["tools"] = body.tools
+
+    upstream_headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://airesearchcoach.org",
+        "X-Title": "AI Research Coach",
+    }
+
+    # read=None disables the read timeout so long completions aren't truncated.
+    timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+
+    client = httpx.AsyncClient(timeout=timeout)
+    upstream_request = client.build_request(
+        "POST",
+        "https://openrouter.ai/api/v1/chat/completions",
+        json=payload,
+        headers=upstream_headers,
+    )
+    response = await client.send(upstream_request, stream=True)
+
+    if response.status_code != 200:
+        error_body = await response.aread()
+        await client.aclose()
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=error_body.decode("utf-8", errors="replace"),
+        )
+
+    async def generate():
+        try:
+            async for chunk in response.aiter_bytes():
+                if await http_request.is_disconnected():
+                    break
+                yield chunk
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
@@ -321,11 +418,13 @@ def create_app(
     working_dir: Path,
     passcode: str,
     extra_origins: Optional[list[str]] = None,
+    openrouter_api_key: Optional[str] = None,
 ) -> FastAPI:
     """Configure and return the FastAPI app (used by tests / programmatic embedding)."""
-    global SERVER_WORKING_DIR, SERVER_PASSCODE
+    global SERVER_WORKING_DIR, SERVER_PASSCODE, OPENROUTER_API_KEY
     SERVER_WORKING_DIR = working_dir
     SERVER_PASSCODE = passcode
+    OPENROUTER_API_KEY = openrouter_api_key
     _install_cors(extra_origins)
     return app
 
@@ -336,11 +435,13 @@ def run_server(
     port: int = 3339,
     passcode: str = "",
     extra_origins: Optional[list[str]] = None,
+    openrouter_api_key: Optional[str] = None,
 ):
     """Run the server with uvicorn."""
-    global SERVER_WORKING_DIR, SERVER_PASSCODE
+    global SERVER_WORKING_DIR, SERVER_PASSCODE, OPENROUTER_API_KEY
     SERVER_WORKING_DIR = working_dir
     SERVER_PASSCODE = passcode
+    OPENROUTER_API_KEY = openrouter_api_key
     _install_cors(extra_origins)
 
     import uvicorn

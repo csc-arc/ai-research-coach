@@ -1,9 +1,8 @@
 import SettingsIcon from "@mui/icons-material/Settings";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
 import { Alert, Box, IconButton, Paper, Typography } from "@mui/material";
-import { ReactNode, useCallback, useMemo, useState } from "react";
-import { getStoredOpenRouterApiKey } from "../../chat/apiKeyStorage";
-import { AVAILABLE_MODELS, CHEAP_MODELS, DEFAULT_MODEL } from "../../chat/availableModels";
+import { ReactNode, useMemo, useState } from "react";
+import { AVAILABLE_MODELS, DEFAULT_MODEL } from "../../chat/availableModels";
 import { createCompletionFunction } from "../../chat/createCompletionFunction";
 import { tools } from "../../chat/tools";
 import ChatSettingsDialog from "./ChatSettingsDialog";
@@ -30,22 +29,14 @@ export function AIResearchCoachChatPanel(
   }
 ) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [currentModel, setCurrentModel] = useState(DEFAULT_MODEL);
   const { studentId, projectId, isComplete: hasStudentProject, update: updateStudentProject } = useStudentProject();
 
-  // Check for hide-tool-details query parameter
   const hideToolDetails = new URLSearchParams(window.location.search).get('hide-tool-details') === '1';
 
-  // Check if API key is required but not present
-  const requiresApiKey = !CHEAP_MODELS.includes(currentModel);
-  const hasApiKey = !!getStoredOpenRouterApiKey();
-  const needsApiKey = requiresApiKey && !hasApiKey;
   const needsStudentProject = !hasStudentProject;
 
-  // Create the completion function
   const completionFunction = useMemo(() => createCompletionFunction(), []);
 
-  // Build the system prompt dynamically
   const systemPrompt = useMemo(() => {
     const parts: string[] = [];
 
@@ -84,7 +75,6 @@ Available tools:
     return parts.join("\n\n");
   }, [instructions, instructionsLoading, suggestionsEnabled]);
 
-  // Build tool context for execution
   const toolContext: ToolContext = useMemo(() => ({
     outputEmitter,
     requestApproval,
@@ -92,15 +82,9 @@ Available tools:
     updateExecutionStatus
   }), [outputEmitter, requestApproval, updateServerHealth, updateExecutionStatus]);
 
-  // Handle model change
-  const handleModelChange = useCallback((newModel: string) => {
-    setCurrentModel(newModel);
-  }, []);
-
-  // Parse welcome message from instructions
   const welcomeMessage = useMemo(() => {
     if (!instructions) return null;
-    
+
     const lines = instructions.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
@@ -149,7 +133,6 @@ Available tools:
     </Paper>
   );
 
-  // Show loading only when loading and no error
   const showLoading = instructionsLoading && !instructionsError;
 
   return (
@@ -173,26 +156,6 @@ Available tools:
         </Alert>
       )}
 
-      {/* API Key Warning */}
-      {needsApiKey && (
-        <Alert
-          severity="warning"
-          sx={{ mx: 2, mt: 1 }}
-          action={
-            <IconButton
-              size="small"
-              color="inherit"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <SettingsIcon fontSize="small" />
-            </IconButton>
-          }
-        >
-          This model requires an OpenRouter API key. Click settings to add one
-          or switch to a free model.
-        </Alert>
-      )}
-
       {/* Chat Panel */}
       <Box sx={{ flex: 1, overflow: "hidden" }}>
         <ChatPanel
@@ -201,26 +164,23 @@ Available tools:
           toolContext={toolContext}
           systemPrompt={systemPrompt}
           availableModels={AVAILABLE_MODELS}
-          defaultModel={currentModel}
-          cheapModels={CHEAP_MODELS}
+          defaultModel={DEFAULT_MODEL}
           title="Assistant"
           placeholder={
             instructionsError
               ? "Fix configuration errors to continue..."
               : needsStudentProject
                 ? "Set Student ID and Project ID in Settings to continue..."
-                : needsApiKey
-                  ? "API key required..."
-                  : "Type your message here..."
+                : "Type your message here..."
           }
           emptyStateContent={emptyStateContent}
           enableSuggestions={suggestionsEnabled}
           enableCompression={true}
           enableExport={true}
-          enableModelSelection={true}
+          enableModelSelection={false}
           isLoading={showLoading}
-          onModelChange={handleModelChange}
           hideToolDetails={hideToolDetails}
+          autoStartConversation={!needsStudentProject && !instructionsLoading && !!instructions && !instructionsError}
         />
       </Box>
 
@@ -228,8 +188,6 @@ Available tools:
       <ChatSettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        currentModel={currentModel}
-        onModelChange={handleModelChange}
         studentId={studentId}
         projectId={projectId}
         onStudentProjectChange={updateStudentProject}

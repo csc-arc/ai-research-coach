@@ -1,6 +1,7 @@
 """CLI entry point for ai-research-coach server"""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +43,14 @@ def main():
         help="Additional CORS origin to allow. May be repeated. "
              "Default origins (https://arc-csc.github.io and http://localhost:5173) are always allowed.",
     )
+    start_parser.add_argument(
+        "--openrouter-api-key",
+        default=None,
+        help="OpenRouter API key for LLM completions. Falls back to the "
+             "OPENROUTER_API_KEY environment variable if not supplied. "
+             "Never pass this on the command line in production — use "
+             "EnvironmentFile= in the systemd unit instead.",
+    )
 
     args = parser.parse_args()
 
@@ -49,12 +58,17 @@ def main():
         working_dir = Path(args.working_dir).resolve()
         working_dir.mkdir(parents=True, exist_ok=True)
 
+        # Resolve the API key: flag takes precedence, then env var.
+        openrouter_api_key = args.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+        key_status = "configured" if openrouter_api_key else "NOT SET (completions will return 503)"
+
         print("Starting AI Research Coach server...")
         print(f"  Working directory root: {working_dir}")
         print(f"  Per-session layout:     {working_dir}/workspaces/<student_id>/<project_id>/")
         print(f"  Host:                   {args.host}")
         print(f"  Port:                   {args.port}")
         print(f"  Extra CORS origins:     {args.allow_origin or '(none)'}")
+        print(f"  OpenRouter key:         {key_status}")
         print()
 
         from .server import run_server
@@ -65,6 +79,7 @@ def main():
             port=args.port,
             passcode=args.passcode,
             extra_origins=args.allow_origin,
+            openrouter_api_key=openrouter_api_key,
         )
     else:
         parser.print_help()

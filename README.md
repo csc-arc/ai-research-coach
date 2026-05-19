@@ -10,12 +10,17 @@ Forked from [magland/chatgeneral](https://github.com/magland/chatgeneral).
 +---------------------------+        HTTPS         +---------------------------+
 | Browser (GitHub Pages)    |  /api/run-script ─▶  | FastAPI on droplet        |
 | https://arc-csc.github.io |  /files/...      ─▶  | airesearchcoach-server    |
-| /ai-research-coach/       |  /health         ─▶  | .airesearchcoach.org      |
-+---------------------------+                      +---------------------------+
-              │
-              ▼
-   https://qp-worker.neurosift.app/api/completion   (LLM completions proxy)
+| /ai-research-coach/       |  /api/completion ─▶  | .airesearchcoach.org      |
+|                           |  /health         ─▶  |                           |
++---------------------------+                      +-------------+-------------+
+                                                                 │ OPENROUTER_API_KEY (server-side)
+                                                                 ▼
+                                                   https://openrouter.ai/api/v1/chat/completions
 ```
+
+LLM completions are proxied through the droplet's own `/api/completion` endpoint.
+The OpenRouter API key lives exclusively in the server's environment — the browser
+never sees it. The model is fixed to `anthropic/claude-4.5-sonnet`.
 
 Each student is identified by a `student_id` and a `project_id`. The backend creates and uses:
 
@@ -47,8 +52,7 @@ Static output is in `dist/`. The Vite `base` is `/ai-research-coach/`, so deploy
 ### Settings the user must enter
 
 - **Student ID** and **Project ID** (required before any script can run). Allowed pattern: `^[A-Za-z0-9_-]{1,64}$`. Persisted in `localStorage`. Can be pre-filled via URL params: `?student_id=jane-doe&project_id=intro-2026`.
-- **Server passcode**: prompted on first script execution; stored in `sessionStorage` per server URL.
-- **OpenRouter API key** (optional): only required for premium models.
+- **Server passcode**: prompted on first use; stored in `sessionStorage` per server URL. Used for both script execution and LLM completions.
 
 ### Default server
 
@@ -66,7 +70,7 @@ pip install -e .
 ### Run
 
 ```bash
-ai-research-coach start-server \
+OPENROUTER_API_KEY=sk-or-... ai-research-coach start-server \
   --host 0.0.0.0 \
   --port 3339 \
   --working-dir /srv/ai-research-coach \
@@ -80,6 +84,7 @@ Flags:
 - `--working-dir` — directory under which `workspaces/<student_id>/<project_id>/` is created
 - `--passcode` *(required)* — shared secret for client authentication
 - `--allow-origin` — repeatable; add additional CORS origins beyond the bundled defaults (`https://arc-csc.github.io` and `http://localhost:5173`)
+- `--openrouter-api-key` — OpenRouter key for LLM completions (prefer the `OPENROUTER_API_KEY` env var over this flag to keep the key out of `ps aux`)
 
 ### API
 
@@ -87,6 +92,7 @@ Flags:
 |---|---|---|
 | `/health` | GET | Returns `{status, workingDir, service}` |
 | `/api/run-script` | POST | Body must include `student_id`, `project_id`, `script`, `scriptType`, `timeout`, `passcode` |
+| `/api/completion` | POST | Streaming LLM proxy. Body: `{model, systemMessage, messages, tools?, passcode}`. Returns SSE. Requires `OPENROUTER_API_KEY` on the server. |
 | `/files/{student_id}/{project_id}/{path}` | GET / HEAD | Serves files from inside the matching session directory; range requests supported |
 
 ### Path validation
@@ -104,7 +110,17 @@ Flags:
    pip install -e .
    ```
 
-3. Create a `systemd` unit (example):
+3. Create a secrets file readable only by root, then create a `systemd` unit:
+
+   ```bash
+   sudo mkdir -p /etc/ai-research-coach
+   sudo tee /etc/ai-research-coach/secrets.env > /dev/null <<'EOF'
+   AIRC_PASSCODE=replace-me
+   OPENROUTER_API_KEY=sk-or-v1-...
+   EOF
+   sudo chmod 600 /etc/ai-research-coach/secrets.env
+   sudo chown root:root /etc/ai-research-coach/secrets.env
+   ```
 
    ```ini
    # /etc/systemd/system/ai-research-coach.service
@@ -116,17 +132,22 @@ Flags:
    Type=simple
    User=arc
    WorkingDirectory=/srv/ai-research-coach
+   EnvironmentFile=/etc/ai-research-coach/secrets.env
    ExecStart=/usr/local/bin/ai-research-coach start-server \
      --host 127.0.0.1 \
      --port 3339 \
      --working-dir /srv/ai-research-coach \
-     --passcode ${AIRC_PASSCODE}
-   Environment=AIRC_PASSCODE=replace-me
+     --passcode ${AIRC_PASSCODE} \
+     --allow-origin https://airesearchcoach.org
    Restart=on-failure
 
    [Install]
    WantedBy=multi-user.target
    ```
+
+   Use `EnvironmentFile=` rather than inline `Environment=` — the latter
+   shows the key value in `systemctl show` output. To rotate the key, edit
+   `secrets.env` and run `sudo systemctl restart ai-research-coach`.
 
 4. Put **Caddy** (or nginx) in front to terminate TLS:
 

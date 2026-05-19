@@ -1,78 +1,62 @@
 import { CompletionFunction } from "../react-ai-chat";
-import { getStoredOpenRouterApiKey } from "./apiKeyStorage";
 import { parseCompletionStream } from "./parseCompletionStream";
+import { getOrPromptPasscode } from "./passcodeStorage";
+import { getServerUrl } from "../serverConfig";
 
 // Retry configuration for rate limit errors
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 10000; // 10 seconds
 
-/**
- * Sleep for a given number of milliseconds
- */
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Check if an error is a rate limit error
- */
 const isRateLimitError = (status: number, errorMessage: string): boolean => {
   return status === 429 || errorMessage.toLowerCase().includes("rate limit");
 };
 
 /**
- * Creates a completion function for the react-ai-chat package
- * that connects to the OpenRouter API via our proxy
+ * Creates a completion function that proxies through our own FastAPI backend.
+ * The backend holds the OpenRouter API key; the browser sends only the passcode.
  */
 export const createCompletionFunction = (): CompletionFunction => {
   return async (request, onPartialContent, signal) => {
-    const apiKey = getStoredOpenRouterApiKey();
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+    const serverUrl = getServerUrl();
+    const passcode = await getOrPromptPasscode(serverUrl);
 
-    if (apiKey) {
-      headers["x-openrouter-key"] = apiKey;
+    if (!passcode) {
+      throw new Error("Passcode is required to use the AI assistant.");
     }
 
-    // Build request body.
-    //
-    // NOTE: `app` is sent to the Neurosift `qp-worker` proxy. We keep the
-    // value "chatgeneral" because that is the identifier the upstream proxy
-    // currently recognises -- changing it can cause requests to be rejected.
-    // If you stand up your own completion proxy, update this string and the
-    // fetch URL below to match.
     const body = {
       model: request.model,
       systemMessage: request.systemMessage,
       messages: request.messages,
       tools: request.tools.length > 0 ? request.tools : undefined,
-      app: "chatgeneral",
+      passcode,
     };
 
-    // Fetch with retry logic for rate limit errors
     let response: Response | null = null;
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        response = await fetch("https://qp-worker.neurosift.app/api/completion", {
+        response = await fetch(`${serverUrl}/api/completion`, {
           method: "POST",
-          headers,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
           signal,
         });
 
         if (response.ok) {
-          break; // Success, exit retry loop
+          break;
         }
 
-        // Try to get detailed error message from response body
         let errorDetails = response.statusText || `HTTP ${response.status}`;
         try {
           const errorBody = await response.text();
           if (errorBody) {
             try {
               const errorJson = JSON.parse(errorBody);
-              errorDetails = errorJson.error?.message || errorJson.message || errorJson.error || errorBody;
+              errorDetails = errorJson.detail || errorJson.error?.message || errorJson.message || errorBody;
             } catch {
               errorDetails = errorBody;
             }
@@ -81,29 +65,22 @@ export const createCompletionFunction = (): CompletionFunction => {
           // Couldn't read body, stick with statusText
         }
 
-        // Check if this is a rate limit error and we should retry
         if (isRateLimitError(response.status, errorDetails) && attempt < MAX_RETRIES) {
           const delayMs = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
           console.warn(`Rate limit hit, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
-
-          // Update partial content to show waiting message
           onPartialContent(`⏳ Rate limit reached. Waiting ${Math.round(delayMs / 1000)} seconds before retrying (attempt ${attempt + 1}/${MAX_RETRIES})...`);
-
           await sleep(delayMs);
-          continue; // Retry
+          continue;
         }
 
-        // Not a rate limit error or out of retries
-        lastError = new Error(`OpenRouter API error: ${errorDetails}`);
+        lastError = new Error(`API error: ${errorDetails}`);
         break;
       } catch (err) {
-        // Network error or abort
         if (err instanceof Error && err.name === "AbortError") {
-          throw err; // Don't retry aborted requests
+          throw err;
         }
         lastError = err instanceof Error ? err : new Error(String(err));
 
-        // Only retry network errors if we have retries left
         if (attempt < MAX_RETRIES) {
           const delayMs = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
           console.warn(`Network error, retrying in ${delayMs / 1000}s...`);
