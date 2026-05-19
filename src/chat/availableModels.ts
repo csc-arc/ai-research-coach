@@ -1,9 +1,9 @@
 export const AVAILABLE_MODELS = [
   {
-    model: "anthropic/claude-4.5-sonnet",
-    label: "claude-4.5-sonnet",
-    cost: { prompt: 3, completion: 15 },
+    model: "openai/gpt-chat-latest",
+    label: "gpt-chat-latest",
+    cost: { prompt: 0, completion: 0 },
   },
 ];
 
-export const DEFAULT_MODEL = "anthropic/claude-4.5-sonnet";
+export const DEFAULT_MODEL = "openai/gpt-chat-latest";
