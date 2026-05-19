@@ -48,10 +48,12 @@ export function ChatPanel({
   onModelChange,
   isLoading = false,
   hideToolDetails = false,
+  autoStartConversation = false,
 }: ChatPanelProps) {
   const {
     chat,
     submitUserMessage,
+    triggerAgentGreeting,
     responding,
     compressing,
     partialResponse,
@@ -78,6 +80,26 @@ export function ChatPanel({
   const [errorExpanded, setErrorExpanded] = useState<boolean>(false);
   const conversationRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Guard so we fire at most once per mount, even if conditions change multiple times
+  const hasAutoStartedRef = useRef(false);
+
+  // Auto-start: trigger agent greeting when conditions are met on cold-start.
+  // Fires only when autoStartConversation is true, the chat has no messages yet,
+  // we're not already loading/responding, and the system prompt is ready.
+  useEffect(() => {
+    if (
+      autoStartConversation &&
+      !hasAutoStartedRef.current &&
+      chat.messages.length === 0 &&
+      !responding &&
+      !isLoading &&
+      systemPrompt
+    ) {
+      hasAutoStartedRef.current = true;
+      triggerAgentGreeting();
+    }
+  }, [autoStartConversation, chat.messages.length, responding, isLoading, systemPrompt, triggerAgentGreeting]);
 
   // Compression threshold (number of messages before suggesting compression)
   const compressionThreshold = 35;

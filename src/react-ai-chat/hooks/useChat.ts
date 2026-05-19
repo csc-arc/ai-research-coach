@@ -702,9 +702,19 @@ ${plainTextConversation}`;
     setResponding(false);
   }, []);
 
+  /**
+   * Trigger the agent to speak first without any user message.
+   * Used for cold-start: the agent runs its initialization sequence
+   * (workspace check, session-log detection, etc.) and opens the conversation.
+   */
+  const triggerAgentGreeting = useCallback(async () => {
+    await generateResponse(chat);
+  }, [chat, generateResponse]);
+
   return {
     chat,
     submitUserMessage,
+    triggerAgentGreeting,
     responding,
     compressing,
     partialResponse,

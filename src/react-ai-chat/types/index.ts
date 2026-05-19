@@ -292,6 +292,15 @@ export interface ChatPanelProps {
    * @default false
    */
   hideToolDetails?: boolean;
+
+  /**
+   * When true, the agent automatically speaks first as soon as the chat is
+   * ready (instructions loaded, no existing messages). Used to solve the
+   * blank-page problem on cold-start. The agent runs its initialization
+   * sequence and opens the conversation without waiting for user input.
+   * @default false
+   */
+  autoStartConversation?: boolean;
 }
 
 /**
