@@ -198,7 +198,7 @@ function AppContent() {
 
   const { instructions, instructionsError, instructionsLoading, suggestionsEnabled, reloadInstructions, recordingMode, rawTemplate } = useInstructions(instructionsUrl);
 
-  const queryParams = useMemo(() => getAllQueryParameters(), []);
+  const queryParams = useMemo(() => getAllQueryParameters(), [instructionsUrl]);
 
   // For recording-mode=split, run /api/start-session before mounting the chat,
   // and use the response to fill template substitutions and rehydrate the
