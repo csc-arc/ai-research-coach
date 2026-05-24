@@ -403,10 +403,17 @@ function TranscriptTab({
         const isUser = msg.role === "user";
         const isAssistant = msg.role === "assistant";
         if (isUser) userTurn += 1;
-        const turnIndex = isUser ? userTurn : null;
+        // A "turn" is (user input → coach response). We label both rows with
+        // the same turn number so the pairing is visually obvious. The
+        // opening greeting (assistant message before any user input) has no
+        // turn number — it isn't really a turn.
+        const turnIndex = userTurn > 0 ? userTurn : null;
         const fastEvalForCoachAfter = isAssistant
           ? fastEvalByUserTurn.get(userTurn)
           : undefined;
+        // Annotate / replay controls live on the assistant row, since
+        // they're about the coach's response to the user's input.
+        const showCoachControls = isAssistant && turnIndex != null;
 
         return (
           <Box key={i}>
@@ -437,9 +444,9 @@ function TranscriptTab({
                   {turnIndex != null ? ` · turn ${turnIndex}` : ""}
                   {msg.timestamp ? ` · ${msg.timestamp}` : ""}
                 </Typography>
-                {isUser && (
+                {showCoachControls && (
                   <Stack direction="row" spacing={0.5}>
-                    <Tooltip title="Replay this turn">
+                    <Tooltip title="Replay this coach response">
                       <IconButton
                         size="small"
                         onClick={() => setReplayState({ turn: userTurn })}
@@ -452,8 +459,8 @@ function TranscriptTab({
               </Box>
               <MarkdownContent content={typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)} />
 
-              {/* Turn-level annotation widget. Anchor on the user turn. */}
-              {isUser && (
+              {/* Turn-level annotation widget anchored on the coach response. */}
+              {showCoachControls && (
                 <TurnAnnotationWidget
                   pi={pi}
                   project={project}
