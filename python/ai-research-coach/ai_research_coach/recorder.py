@@ -43,13 +43,39 @@ DEEP_EVALUATOR_TIMEOUT_SECONDS = 45
 RECORDER_TIMEOUT_SECONDS = 120
 
 PROMPT_TTL_SECONDS = 5 * 60
+PROMPT_SHA_TTL_SECONDS = 30
 
-PROMPT_BASE_URL = (
-    "https://raw.githubusercontent.com/csc-arc/ai-research-coach/main/public/"
+# Prompt files served from public/ and used by the eval/recorder agents. The
+# coach prompt (instructions.md or instructions-v1.md) lives in the same
+# directory but is loaded by the browser, not here, so it isn't listed.
+PROMPT_FILES = {
+    "fast_eval": "fast-eval-prompt.md",
+    "deep_eval": "deep-eval-prompt.md",
+    "recorder": "recorder-prompt.md",
+}
+
+REPO_OWNER = "csc-arc"
+REPO_NAME = "ai-research-coach"
+PROMPT_BASE_URL_MAIN = (
+    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/public/"
 )
-FAST_EVAL_PROMPT_URL = PROMPT_BASE_URL + "fast-eval-prompt.md"
-DEEP_EVAL_PROMPT_URL = PROMPT_BASE_URL + "deep-eval-prompt.md"
-RECORDER_PROMPT_URL = PROMPT_BASE_URL + "recorder-prompt.md"
+
+
+def _prompt_url_at(sha: Optional[str], filename: str) -> str:
+    """Return the raw.githubusercontent URL for `filename` at `sha`. When
+    `sha` is None or the literal string 'main', use the head of `main`.
+    """
+    ref = sha if (sha and sha != "main") else "main"
+    return (
+        f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{ref}/public/"
+        f"{filename}"
+    )
+
+
+# Legacy-compatible URLs used when no per-session SHA is available.
+FAST_EVAL_PROMPT_URL = PROMPT_BASE_URL_MAIN + PROMPT_FILES["fast_eval"]
+DEEP_EVAL_PROMPT_URL = PROMPT_BASE_URL_MAIN + PROMPT_FILES["deep_eval"]
+RECORDER_PROMPT_URL = PROMPT_BASE_URL_MAIN + PROMPT_FILES["recorder"]
 
 COACH_ISSUE_RECURRENCE_THRESHOLD = 3
 COACH_STYLE_NOTES_HEADING = "## Coach style notes"
@@ -81,6 +107,13 @@ COACH_SESSIONS_DIR = Path(
     os.environ.get("ARC_COACH_SESSIONS_DIR", str(Path.home() / "coach-sessions"))
 ).expanduser()
 
+# Shared lock around every git operation against the local coach-sessions
+# clone. Acquired by the recorder's `_sync_to_coach_sessions`, the PI browse
+# API's `git pull --ff-only`, and all three feedback POST endpoints. Held
+# only around the actual git invocations, so contention is bound by git
+# wall-time. Kept at module scope (see plan: "Cross-cutting concerns").
+COACH_SESSIONS_GIT_LOCK = asyncio.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Prompt + project description fetch caches
@@ -88,6 +121,10 @@ COACH_SESSIONS_DIR = Path(
 
 _prompt_cache: dict[str, tuple[float, str]] = {}
 _project_description_cache: dict[str, tuple[float, str]] = {}
+
+# Cache of the resolved head-of-main SHA. Two consecutive session starts
+# within PROMPT_SHA_TTL_SECONDS share one GitHub API call.
+_prompts_sha_cache: dict[str, tuple[float, str]] = {}
 
 
 async def _fetch_text_with_cache(
@@ -113,6 +150,70 @@ async def _fetch_prompt(url: str) -> str:
     return await _fetch_text_with_cache(_prompt_cache, url)
 
 
+async def fetch_prompt_for_session(
+    prompt_key: str, prompts_sha: Optional[str]
+) -> str:
+    """Fetch a prompt file at the SHA pinned for this session. The cache key
+    includes the SHA so two concurrent sessions on different SHAs cannot
+    collide. Falls back to head-of-main when `prompts_sha` is missing."""
+    filename = PROMPT_FILES[prompt_key]
+    url = _prompt_url_at(prompts_sha, filename)
+    return await _fetch_prompt(url)
+
+
+async def resolve_prompts_sha() -> str:
+    """Return the head commit SHA of csc-arc/ai-research-coach `main`.
+
+    Cached for ~30s to avoid hammering the GitHub API on bursty session
+    starts. On any failure, falls back to a sha256 content-hash of the
+    locally-fetched prompt files (truncated to 16 chars, prefixed `local:`)
+    so the system stays available when GitHub is degraded — same shape as
+    the existing project_description_sha mechanism.
+    """
+    cache_key = f"{REPO_OWNER}/{REPO_NAME}@main"
+    now = time.monotonic()
+    cached = _prompts_sha_cache.get(cache_key)
+    if cached is not None:
+        ts, sha = cached
+        if now - ts < PROMPT_SHA_TTL_SECONDS:
+            return sha
+
+    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/branches/main"
+    headers = {"Accept": "application/vnd.github+json"}
+    gh_token = os.environ.get("GITHUB_TOKEN")
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(api_url, headers=headers)
+            r.raise_for_status()
+            payload = r.json()
+        sha = payload.get("commit", {}).get("sha", "")
+        if isinstance(sha, str) and len(sha) == 40 and all(
+            c in "0123456789abcdef" for c in sha
+        ):
+            _prompts_sha_cache[cache_key] = (now, sha)
+            return sha
+    except (httpx.HTTPError, ValueError, KeyError) as e:
+        logger.warning(f"resolve_prompts_sha failed via GitHub API: {e}")
+
+    # Fallback: hash the locally-fetched prompt files. Better than recording
+    # nothing — at least the bytes pinned for this session are traceable.
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        for key in ("fast_eval", "deep_eval", "recorder"):
+            url = PROMPT_BASE_URL_MAIN + PROMPT_FILES[key]
+            text = await _fetch_prompt(url)
+            h.update(text.encode("utf-8", errors="replace"))
+        digest = "local:" + h.hexdigest()[:16]
+    except httpx.HTTPError as e:
+        logger.warning(f"resolve_prompts_sha fallback hash failed: {e}")
+        digest = "unknown"
+    _prompts_sha_cache[cache_key] = (now, digest)
+    return digest
+
+
 async def _fetch_project_description(project_id: str) -> str:
     """Fetch and cache the project description."""
     url = (
@@ -132,6 +233,23 @@ async def _fetch_project_description(project_id: str) -> str:
 
 def _session_dir(student_id: str, project_id: str) -> Path:
     return server_module._session_dir(student_id, project_id)
+
+
+def _read_active_session(session_dir: Path) -> dict:
+    """Return the parsed active-session.json or an empty dict."""
+    path = session_dir / "active-session.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _prompts_sha_for_session(session_dir: Path) -> Optional[str]:
+    """Return the prompts_sha pinned for this session, or None for legacy
+    sessions started before Phase A1 landed."""
+    return _read_active_session(session_dir).get("prompts_sha") or None
 
 
 def _read_log(
@@ -524,8 +642,9 @@ async def run_fast_evaluator(student_id: str, project_id: str) -> None:
     if not recent:
         return
 
+    prompts_sha = _prompts_sha_for_session(session_dir)
     try:
-        prompt = await _fetch_prompt(FAST_EVAL_PROMPT_URL)
+        prompt = await fetch_prompt_for_session("fast_eval", prompts_sha)
     except httpx.HTTPError as e:
         logger.warning(f"fast_eval prompt fetch failed: {e}")
         return
@@ -558,6 +677,36 @@ async def run_fast_evaluator(student_id: str, project_id: str) -> None:
         _atomic_write_text(fast_path, out)
     except OSError as e:
         logger.warning(f"fast_eval write failed: {e}")
+
+    # Phase A2: append the structured fast-eval payload to a per-session
+    # JSONL log so the QA viewer can show inline fast-eval context next to
+    # each coach turn. Not load-bearing for replay (replay re-computes), so
+    # write failures here are non-fatal.
+    try:
+        latest_user_turn = next(
+            (t for t in reversed(recent) if t.get("role") == "user"), None
+        )
+        # Turn index = number of user messages logged so far (1-indexed).
+        all_turns = _read_log(session_dir)
+        user_turn_count = sum(1 for t in all_turns if t.get("role") == "user")
+        preview = ""
+        ts = ""
+        if isinstance(latest_user_turn, dict):
+            content = latest_user_turn.get("content")
+            if isinstance(content, str):
+                preview = content[:80]
+            ts = latest_user_turn.get("timestamp", "")
+        entry = {
+            "turn": user_turn_count,
+            "ts": ts,
+            "user_message_preview": preview,
+            "fast_eval": args,
+        }
+        turns_path = session_dir / "fast-eval-turns.jsonl"
+        with open(turns_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logger.warning(f"fast-eval-turns append failed: {e}")
 
 
 def _render_fast_eval_user_message(recent_turns: list[dict], project_description: str) -> str:
@@ -667,8 +816,9 @@ async def run_deep_evaluator(
             except OSError:
                 prior_eval = ""
 
+    prompts_sha = _prompts_sha_for_session(session_dir)
     try:
-        prompt = await _fetch_prompt(DEEP_EVAL_PROMPT_URL)
+        prompt = await fetch_prompt_for_session("deep_eval", prompts_sha)
     except httpx.HTTPError as e:
         logger.warning(f"deep_eval prompt fetch failed: {e}")
         return
@@ -941,6 +1091,7 @@ async def run_recorder(
     chat_log_path = session_dir / "chat-log.jsonl"
     deep_eval_path = session_dir / "current-deep-eval.md"
     fast_eval_path = session_dir / "current-fast-eval.md"
+    fast_eval_turns_path = session_dir / "fast-eval-turns.jsonl"
     eval_state_path = session_dir / "eval-state.json"
     active_path = session_dir / "active-session.json"
     cumulative_path = session_dir / "cumulative-report.md"
@@ -975,19 +1126,23 @@ async def run_recorder(
     )
 
     project_description_sha = ""
+    active_session_data: dict = {}
     if active_path.exists():
         try:
-            active = json.loads(active_path.read_text())
-            project_description_sha = active.get("project_description_sha", "")
+            active_session_data = json.loads(active_path.read_text())
+            project_description_sha = active_session_data.get(
+                "project_description_sha", ""
+            )
         except (json.JSONDecodeError, OSError):
-            pass
+            active_session_data = {}
 
     # Compute deterministic numbers the LLM may not get right.
     message_count_actual = _count_jsonl_lines(chat_log_path)
     duration_seconds_actual = _safe_duration_seconds(session_start, session_end)
 
+    prompts_sha = active_session_data.get("prompts_sha") or None
     try:
-        prompt = await _fetch_prompt(RECORDER_PROMPT_URL)
+        prompt = await fetch_prompt_for_session("recorder", prompts_sha)
     except httpx.HTTPError as e:
         logger.warning(f"recorder prompt fetch failed: {e}")
         return await _failure_archive(
@@ -1075,6 +1230,20 @@ async def run_recorder(
     metadata["message_count"] = message_count_actual
     metadata["duration_seconds"] = duration_seconds_actual
     metadata["status"] = "recorded"
+    # Attach the prompt-version and model fields recorded at session start
+    # (Phase A1). These let the QA replay endpoint resolve "original mode"
+    # against the exact prompt content the coach actually used.
+    if prompts_sha:
+        metadata["prompts_sha"] = prompts_sha
+        metadata["prompts"] = {
+            "coach": "instructions.md",
+            "fast_eval": PROMPT_FILES["fast_eval"],
+            "deep_eval": PROMPT_FILES["deep_eval"],
+            "recorder": PROMPT_FILES["recorder"],
+        }
+    models_block = active_session_data.get("models")
+    if isinstance(models_block, dict) and models_block:
+        metadata["models"] = models_block
     summary_md = (args.get("summary_md") or "").rstrip() + "\n"
     cumulative_report_md = (args.get("cumulative_report_md") or "").rstrip() + "\n"
 
@@ -1093,6 +1262,9 @@ async def run_recorder(
             shutil.copy2(deep_eval_path, tmp_dir / "evaluation.md")
         else:
             (tmp_dir / "evaluation.md").write_text("(no evaluation produced)\n", encoding="utf-8")
+        # Phase A2: include the per-turn fast-eval JSONL when present.
+        if fast_eval_turns_path.exists():
+            shutil.copy2(fast_eval_turns_path, tmp_dir / "fast-eval-turns.jsonl")
 
         cumulative_tmp = session_dir / "cumulative-report.md.tmp"
         cumulative_tmp.write_text(cumulative_report_md, encoding="utf-8")
@@ -1102,7 +1274,14 @@ async def run_recorder(
         os.replace(cumulative_tmp, cumulative_path)
 
         # Delete originals (post-commit).
-        for p in (chat_log_path, deep_eval_path, fast_eval_path, eval_state_path, active_path):
+        for p in (
+            chat_log_path,
+            deep_eval_path,
+            fast_eval_path,
+            fast_eval_turns_path,
+            eval_state_path,
+            active_path,
+        ):
             try:
                 p.unlink(missing_ok=True)
             except OSError:
@@ -1321,6 +1500,7 @@ async def _failure_archive(
         chat_log_path = session_dir / "chat-log.jsonl"
         deep_eval_path = session_dir / "current-deep-eval.md"
         fast_eval_path = session_dir / "current-fast-eval.md"
+        fast_eval_turns_path = session_dir / "fast-eval-turns.jsonl"
         eval_state_path = session_dir / "eval-state.json"
         active_path = session_dir / "active-session.json"
 
@@ -1332,6 +1512,12 @@ async def _failure_archive(
             shutil.copy2(deep_eval_path, tmp_dir / "evaluation.md")
         else:
             (tmp_dir / "evaluation.md").write_text("", encoding="utf-8")
+        if fast_eval_turns_path.exists():
+            shutil.copy2(fast_eval_turns_path, tmp_dir / "fast-eval-turns.jsonl")
+
+        # Capture per-session prompt SHA / model IDs (Phase A1) before
+        # active-session.json is unlinked below.
+        active_data = _read_active_session(session_dir)
 
         metadata = {
             "student_id": student_id,
@@ -1353,6 +1539,16 @@ async def _failure_archive(
             "has_pi_notes": False,
             "project_description_sha": project_description_sha,
         }
+        if active_data.get("prompts_sha"):
+            metadata["prompts_sha"] = active_data["prompts_sha"]
+            metadata["prompts"] = {
+                "coach": "instructions.md",
+                "fast_eval": PROMPT_FILES["fast_eval"],
+                "deep_eval": PROMPT_FILES["deep_eval"],
+                "recorder": PROMPT_FILES["recorder"],
+            }
+        if isinstance(active_data.get("models"), dict):
+            metadata["models"] = active_data["models"]
         (tmp_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
         )
@@ -1361,7 +1557,14 @@ async def _failure_archive(
 
         # cumulative-report.md is intentionally NOT rewritten on failure.
         # Clean up the originals.
-        for p in (chat_log_path, deep_eval_path, fast_eval_path, eval_state_path, active_path):
+        for p in (
+            chat_log_path,
+            deep_eval_path,
+            fast_eval_path,
+            fast_eval_turns_path,
+            eval_state_path,
+            active_path,
+        ):
             try:
                 p.unlink(missing_ok=True)
             except OSError:
@@ -1431,70 +1634,82 @@ async def _sync_to_coach_sessions(
         return {"status": "queued_retry", "error": "pi missing"}
 
     tracker = COACH_SESSIONS_DIR
-    if not tracker.exists():
+
+    async with COACH_SESSIONS_GIT_LOCK:
+        if not tracker.exists():
+            rc, _, err = await _run_subprocess(
+                "git", "clone", COACH_SESSIONS_REPO_URL, str(tracker), timeout=120
+            )
+            if rc != 0:
+                logger.warning(f"coach-sessions clone failed: {err}")
+                return {"status": "queued_retry", "error": err}
+
         rc, _, err = await _run_subprocess(
-            "git", "clone", COACH_SESSIONS_REPO_URL, str(tracker), timeout=120
+            "git", "pull", "--ff-only", cwd=tracker, timeout=30
         )
         if rc != 0:
-            logger.warning(f"coach-sessions clone failed: {err}")
+            logger.warning(f"coach-sessions pull failed: {err}")
+            # Continue anyway — we may be able to push if remote hasn't moved.
+
+        target_root = tracker / pi / project_id / student_id
+        target_session = target_root / "sessions" / session_start
+        target_session.mkdir(parents=True, exist_ok=True)
+
+        src_session = session_dir / "sessions" / session_start
+        src_cumulative = session_dir / "cumulative-report.md"
+
+        files_to_copy = [
+            (src_session / "summary.md", target_session / "summary.md"),
+            (src_session / "metadata.json", target_session / "metadata.json"),
+            (src_session / "transcript.jsonl", target_session / "transcript.jsonl"),
+            (src_session / "evaluation.md", target_session / "evaluation.md"),
+            (
+                src_session / "fast-eval-turns.jsonl",
+                target_session / "fast-eval-turns.jsonl",
+            ),
+        ]
+        if not skip_cumulative:
+            files_to_copy.append((src_cumulative, target_root / "cumulative-report.md"))
+
+        for src, dst in files_to_copy:
+            if src.exists():
+                try:
+                    shutil.copy2(src, dst)
+                except OSError as e:
+                    logger.warning(f"copy {src} → {dst} failed: {e}")
+
+        rc, _, err = await _run_subprocess("git", "add", ".", cwd=tracker, timeout=30)
+        if rc != 0:
             return {"status": "queued_retry", "error": err}
 
-    rc, _, err = await _run_subprocess("git", "pull", "--ff-only", cwd=tracker, timeout=30)
-    if rc != 0:
-        logger.warning(f"coach-sessions pull failed: {err}")
-        # Continue anyway — we may be able to push if remote hasn't moved.
+        rc, status_out, _ = await _run_subprocess(
+            "git", "status", "--porcelain", cwd=tracker, timeout=10
+        )
+        if not status_out.strip():
+            # Nothing to commit — can happen on a re-run with identical content.
+            return {"status": "recorded", "commit_sha": None}
 
-    target_root = tracker / pi / project_id / student_id
-    target_session = target_root / "sessions" / session_start
-    target_session.mkdir(parents=True, exist_ok=True)
+        commit_msg = f"session: {student_id} on {project_id} at {session_start}"
+        rc, _, err = await _run_subprocess(
+            "git", "commit", "-m", commit_msg, cwd=tracker, timeout=30
+        )
+        if rc != 0:
+            logger.warning(f"coach-sessions commit failed: {err}")
+            return {"status": "queued_retry", "error": err}
 
-    src_session = session_dir / "sessions" / session_start
-    src_cumulative = session_dir / "cumulative-report.md"
+        rc, sha_out, _ = await _run_subprocess(
+            "git", "rev-parse", "HEAD", cwd=tracker, timeout=10
+        )
+        commit_sha: Optional[str] = (
+            sha_out.strip() if rc == 0 and sha_out.strip() else None
+        )
 
-    files_to_copy = [
-        (src_session / "summary.md", target_session / "summary.md"),
-        (src_session / "metadata.json", target_session / "metadata.json"),
-        (src_session / "transcript.jsonl", target_session / "transcript.jsonl"),
-        (src_session / "evaluation.md", target_session / "evaluation.md"),
-    ]
-    if not skip_cumulative:
-        files_to_copy.append((src_cumulative, target_root / "cumulative-report.md"))
+        rc, _, err = await _run_subprocess("git", "push", cwd=tracker, timeout=60)
+        if rc != 0:
+            logger.warning(f"coach-sessions push failed: {err}")
+            return {"status": "queued_retry", "error": err, "commit_sha": commit_sha}
 
-    for src, dst in files_to_copy:
-        if src.exists():
-            try:
-                shutil.copy2(src, dst)
-            except OSError as e:
-                logger.warning(f"copy {src} → {dst} failed: {e}")
-
-    rc, _, err = await _run_subprocess("git", "add", ".", cwd=tracker, timeout=30)
-    if rc != 0:
-        return {"status": "queued_retry", "error": err}
-
-    rc, status_out, _ = await _run_subprocess(
-        "git", "status", "--porcelain", cwd=tracker, timeout=10
+    logger.info(
+        f"coach-sessions push OK student={student_id} project={project_id} sha={commit_sha}"
     )
-    if not status_out.strip():
-        # Nothing to commit — can happen on a re-run with identical content.
-        return {"status": "recorded", "commit_sha": None}
-
-    commit_msg = f"session: {student_id} on {project_id} at {session_start}"
-    rc, _, err = await _run_subprocess(
-        "git", "commit", "-m", commit_msg, cwd=tracker, timeout=30
-    )
-    if rc != 0:
-        logger.warning(f"coach-sessions commit failed: {err}")
-        return {"status": "queued_retry", "error": err}
-
-    rc, sha_out, _ = await _run_subprocess(
-        "git", "rev-parse", "HEAD", cwd=tracker, timeout=10
-    )
-    commit_sha: Optional[str] = sha_out.strip() if rc == 0 and sha_out.strip() else None
-
-    rc, _, err = await _run_subprocess("git", "push", cwd=tracker, timeout=60)
-    if rc != 0:
-        logger.warning(f"coach-sessions push failed: {err}")
-        return {"status": "queued_retry", "error": err, "commit_sha": commit_sha}
-
-    logger.info(f"coach-sessions push OK student={student_id} project={project_id} sha={commit_sha}")
     return {"status": "recorded", "commit_sha": commit_sha}

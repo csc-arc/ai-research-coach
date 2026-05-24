@@ -179,6 +179,7 @@ interface SessionInit {
   lastSessionSummary: string;
   coachStyleNotes: string;
   chatLog: { role: 'user' | 'assistant'; content: string; timestamp: string }[];
+  coachModel: string;
 }
 
 interface SessionState {
@@ -259,6 +260,7 @@ function AppContent() {
             lastSessionSummary: data.last_session_summary || '',
             coachStyleNotes: data.coach_style_notes || '',
             chatLog: Array.isArray(data.chat_log) ? data.chat_log : [],
+            coachModel: typeof data.coach_model === 'string' ? data.coach_model : '',
           },
         });
       } catch (e) {
@@ -436,6 +438,7 @@ function AppContent() {
       pi={sessionState.init?.pi || queryParams.pi}
       sessionStart={sessionState.init?.sessionStart}
       rehydratedMessages={rehydratedChat ?? undefined}
+      coachModel={sessionState.init?.coachModel}
     />
   )
 

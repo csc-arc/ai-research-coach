@@ -13,6 +13,30 @@ interface MarkdownContentProps {
   doRehypeRaw?: boolean;
 }
 
+// Convert LaTeX-style math delimiters (\( \), \[ \]) into the dollar-sign
+// delimiters that remark-math 6 actually parses. Only touches segments
+// outside fenced code blocks, so code samples that contain these literal
+// characters survive untouched.
+const normalizeMathDelimiters = (input: string): string => {
+  if (!input) return input;
+  const segments = input.split(/(```[\s\S]*?```)/g);
+  return segments
+    .map((seg, i) => {
+      // Odd indices are fenced code blocks (preserve verbatim).
+      if (i % 2 === 1) return seg;
+      // Block math: \[ ... \]  →  $$ ... $$
+      let out = seg.replace(/\\\[([\s\S]*?)\\\]/g, (_m, body) => {
+        return `$$${body}$$`;
+      });
+      // Inline math: \( ... \)  →  $ ... $
+      out = out.replace(/\\\(([\s\S]*?)\\\)/g, (_m, body) => {
+        return `$${body}$`;
+      });
+      return out;
+    })
+    .join("");
+};
+
 const MarkdownContent: FunctionComponent<MarkdownContentProps> = ({
   content,
   doRehypeRaw,
@@ -29,6 +53,11 @@ const MarkdownContent: FunctionComponent<MarkdownContentProps> = ({
     const plugins: any[] = [remarkGfm, remarkMath];
     return plugins;
   }, []);
+
+  const renderedContent = useMemo(
+    () => normalizeMathDelimiters(content),
+    [content]
+  );
 
   return (
     <ReactMarkdown
@@ -103,7 +132,7 @@ const MarkdownContent: FunctionComponent<MarkdownContentProps> = ({
         },
       }}
     >
-      {content}
+      {renderedContent}
     </ReactMarkdown>
   );
 };

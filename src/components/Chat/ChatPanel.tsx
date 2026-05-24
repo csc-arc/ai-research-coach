@@ -2,7 +2,7 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
 import { Alert, Box, IconButton, Paper, Typography } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AVAILABLE_MODELS, DEFAULT_MODEL } from "../../chat/availableModels";
+import { AVAILABLE_MODELS as STATIC_MODELS, DEFAULT_MODEL as STATIC_DEFAULT_MODEL } from "../../chat/availableModels";
 import { createCompletionFunction } from "../../chat/createCompletionFunction";
 import { logMessage } from "../../chat/logMessage";
 import { tools } from "../../chat/tools";
@@ -32,6 +32,7 @@ export function AIResearchCoachChatPanel(
     pi,
     sessionStart,
     rehydratedMessages,
+    coachModel,
   }: {
     instructions: string | null;
     instructionsError: string | null;
@@ -45,6 +46,9 @@ export function AIResearchCoachChatPanel(
     pi?: string;
     sessionStart?: string;
     rehydratedMessages?: ChatMessage[];
+    /** Server-supplied coach model (Phase A0). Overrides the static fallback
+     * so the backend, not the client, is the source of truth. */
+    coachModel?: string;
   }
 ) {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -55,6 +59,24 @@ export function AIResearchCoachChatPanel(
   const needsStudentProject = !hasStudentProject;
 
   const completionFunction = useMemo(() => createCompletionFunction(), []);
+
+  // The backend is the source of truth for the coach model (Phase A0). We
+  // construct the chat library's `availableModels`/`defaultModel` from
+  // whatever /api/start-session returned. When the server hasn't reported
+  // anything yet (alpha mode, very first render), fall back to the static
+  // value so we don't crash; the completion proxy will reject mismatched
+  // models if they slip through.
+  const effectiveModel = (coachModel && coachModel.length > 0) ? coachModel : STATIC_DEFAULT_MODEL;
+  const availableModels = useMemo(
+    () => [{
+      model: effectiveModel,
+      label: effectiveModel.includes("/") ? effectiveModel.split("/")[1] : effectiveModel,
+      cost: { prompt: 0, completion: 0 },
+    }],
+    [effectiveModel]
+  );
+  // Suppress unused-import warning when the static models become a fallback.
+  void STATIC_MODELS;
 
   const systemPrompt = useMemo(() => {
     const parts: string[] = [];
@@ -283,8 +305,8 @@ Available tools:
           tools={tools}
           toolContext={toolContext}
           systemPrompt={systemPrompt}
-          availableModels={AVAILABLE_MODELS}
-          defaultModel={DEFAULT_MODEL}
+          availableModels={availableModels}
+          defaultModel={effectiveModel}
           title="Assistant"
           placeholder={
             instructionsError

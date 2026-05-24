@@ -25,6 +25,15 @@ SERVER_PASSCODE: Optional[str] = None
 SERVER_WORKING_DIR: Optional[Path] = None
 OPENROUTER_API_KEY: Optional[str] = None
 
+# App-level model constants. The coach model is locked at process start; the
+# student-facing UI cannot change it. The QA replay endpoint (Phase A5) is the
+# only place that may override on a per-call basis.
+COACH_MODEL = os.environ.get("ARC_COACH_MODEL", "openai/gpt-chat-latest")
+
+# PI dashboard passcode (separate from the student-facing ARC_PASSCODE).
+# Empty/unset means the PI endpoints are effectively disabled.
+PI_PASSCODE: Optional[str] = os.environ.get("ARC_PI_PASSCODE") or None
+
 # student_id and project_id must be safe path components.
 # Allow letters, digits, dash, underscore. Length 1..64.
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -60,6 +69,18 @@ _SAFE_ENV_PREFIXES = ("LC_",)
 
 
 app = FastAPI(title="AI Research Coach Script Execution Server")
+
+
+def _mount_pi_router_once() -> None:
+    """Lazily mount the PI dashboard router. Recorder.py's module load is
+    expensive (resolves env vars, sets up locks); we keep the import inside
+    a helper so test paths that build a bare FastAPI app can opt in or out.
+    """
+    if getattr(app.state, "_pi_router_mounted", False):
+        return
+    from . import pi_api
+    app.include_router(pi_api.router)
+    app.state._pi_router_mounted = True
 
 
 class ChatMessage(BaseModel):
@@ -140,6 +161,7 @@ class StartSessionResponse(BaseModel):
     last_session_summary: str = ""
     coach_style_notes: str = ""
     chat_log: list[ChatLogMessage] = []
+    coach_model: str = ""
     error: Optional[str] = None
 
 
@@ -723,6 +745,18 @@ async def completion_proxy(body: CompletionProxyRequest, http_request: Request):
             detail="OpenRouter API key not configured on this server",
         )
 
+    # Defense-in-depth: student requests must use the configured coach model.
+    # The QA replay endpoint is the only path that may override on a per-call
+    # basis, and it bypasses this proxy entirely.
+    if body.student_id and body.project_id and body.model != COACH_MODEL:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Coach model is locked to {COACH_MODEL}; received {body.model}. "
+                "Refresh the page so the client picks up the server-configured model."
+            ),
+        )
+
     fast_eval, fast_eval_wait_seconds = await _maybe_await_and_load_fast_eval(
         body.student_id, body.project_id
     )
@@ -736,25 +770,12 @@ async def completion_proxy(body: CompletionProxyRequest, http_request: Request):
             f"deep_eval_present={deep_eval is not None}"
         )
 
-    sections: list[str] = []
-    if deep_eval:
-        sections.append(
-            "## Live evaluation (running)\n\n"
-            "_Auto-maintained across the session by the deep evaluator._\n\n"
-            f"{deep_eval}"
-        )
-    if fast_eval:
-        sections.append(
-            "## Live evaluation (this turn)\n\n"
-            "_Freshly computed for the moment about to unfold. Treat tactical flags "
-            "(coach_issues, open_threads) as a correction signal for the response "
-            "you are about to write._\n\n"
-            f"{fast_eval}"
-        )
-
-    system_message = body.systemMessage
-    if sections:
-        system_message = body.systemMessage + "\n\n---\n\n" + "\n\n---\n\n".join(sections)
+    # Compose the system message via the same helper used by the QA replay
+    # endpoint, so the two paths can't drift.
+    from . import pi_api
+    system_message = pi_api.compose_coach_system_message(
+        body.systemMessage, fast_eval, deep_eval
+    )
 
     messages: list[dict] = [{"role": "system", "content": system_message}]
     messages += [m.model_dump(exclude_none=True) for m in body.messages]
@@ -860,6 +881,12 @@ async def start_session(request: StartSessionRequest):
 
     validate_id(request.student_id, "student_id")
     validate_id(request.project_id, "project_id")
+
+    # Resolve and pin the coach prompt SHA at session start (Phase A1). The
+    # SHA is stored in active-session.json and copied into metadata.json at
+    # session end, so QA replay can reproduce against the exact prompt
+    # versions the coach actually used.
+    prompts_sha = await recorder.resolve_prompts_sha()
 
     session_dir = get_session_dir(request.student_id, request.project_id)
     sessions_dir = session_dir / "sessions"
@@ -976,6 +1003,13 @@ async def start_session(request: StartSessionRequest):
                 "pi": pi,
                 "last_activity": datetime.now(timezone.utc).isoformat(),
                 "project_description_sha": project_description_sha,
+                "prompts_sha": prompts_sha,
+                "models": {
+                    "coach": COACH_MODEL,
+                    "fast_eval": recorder.EVAL_MODEL,
+                    "deep_eval": recorder.EVAL_MODEL,
+                    "recorder": recorder.RECORDER_MODEL,
+                },
             }
             active_path.write_text(json.dumps(active_data))
         else:
@@ -1044,6 +1078,7 @@ async def start_session(request: StartSessionRequest):
         last_session_summary=last_session_summary,
         coach_style_notes=coach_style_notes,
         chat_log=chat_log,
+        coach_model=COACH_MODEL,
     )
 
 
@@ -1157,6 +1192,7 @@ def _sweep_orphans(workspace_dir: Path) -> None:
         "chat-log.jsonl",
         "current-deep-eval.md",
         "current-fast-eval.md",
+        "fast-eval-turns.jsonl",
         "eval-state.json",
         "active-session.json",
     ):
@@ -1208,6 +1244,7 @@ def create_app(
     SERVER_PASSCODE = passcode
     OPENROUTER_API_KEY = openrouter_api_key
     _install_cors(extra_origins)
+    _mount_pi_router_once()
     return app
 
 
@@ -1225,6 +1262,7 @@ def run_server(
     SERVER_PASSCODE = passcode
     OPENROUTER_API_KEY = openrouter_api_key
     _install_cors(extra_origins)
+    _mount_pi_router_once()
 
     import uvicorn
 

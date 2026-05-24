@@ -1,0 +1,878 @@
+"""PI dashboard API — browse, prompt history, replay, and feedback.
+
+All endpoints are gated by `ARC_PI_PASSCODE` (separate from the
+student-facing `ARC_PASSCODE`). The passcode may be sent via the
+`X-PI-Passcode` header or a `?passcode=` query parameter.
+
+The implementation reads from a local clone of `coach-sessions` on the
+droplet (the same one the recorder writes to). All git operations against
+that clone funnel through the shared `COACH_SESSIONS_GIT_LOCK` defined in
+`recorder.py` so concurrent recorder pushes, browse pulls, and feedback
+writes serialize on a single mutex.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import httpx
+from fastapi import APIRouter, Body, Header, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from . import recorder
+from . import server as server_module
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/pi")
+
+
+# Cache for the in-memory index (10 seconds, per the plan).
+_INDEX_CACHE_TTL_SECONDS = 10
+_index_cache: dict[str, Any] = {"ts": 0.0, "tree": None}
+
+# Cache for prompt-history responses (5 minutes).
+_PROMPT_HISTORY_CACHE_TTL_SECONDS = 5 * 60
+_prompt_history_cache: dict[str, tuple[float, list[dict]]] = {}
+
+_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+def _validate_pi_passcode(
+    header_value: Optional[str], query_value: Optional[str]
+) -> None:
+    """Raise 401 unless the supplied passcode matches `ARC_PI_PASSCODE`.
+
+    The PI passcode is configured via env var on the droplet. If it is unset
+    (None or empty), the PI endpoints are effectively disabled — every
+    request returns 401, no exceptions. This keeps the surface inert until
+    the operator has explicitly set the passcode.
+    """
+    expected = server_module.PI_PASSCODE
+    if not expected:
+        raise HTTPException(
+            status_code=401,
+            detail="PI dashboard is not configured on this server",
+        )
+    supplied = header_value or query_value
+    if not supplied or supplied != expected:
+        raise HTTPException(status_code=401, detail="Invalid PI passcode")
+
+
+def _validate_slug(value: str, field_name: str) -> None:
+    if not _SLUG_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name}: must match {_SLUG_RE.pattern}",
+        )
+
+
+def _validate_session_ts(ts: str) -> None:
+    """Sessions are stored under directories named with an ISO-8601 timestamp.
+    Use a slightly looser regex than the slug regex so colons are allowed."""
+    if not re.match(r"^[A-Za-z0-9_.:+-]{1,64}$", ts):
+        raise HTTPException(status_code=400, detail="Invalid session timestamp")
+
+
+# ---------------------------------------------------------------------------
+# Browse — index + session bundle
+# ---------------------------------------------------------------------------
+
+
+async def _refresh_coach_sessions_clone() -> None:
+    """`git pull --ff-only` the local coach-sessions clone, under the shared
+    git lock. Failures are logged but non-fatal — we still serve from the
+    last-known-good local state."""
+    tracker = recorder.COACH_SESSIONS_DIR
+    if not tracker.exists():
+        # First-time setup: clone the repo. (The recorder will also clone on
+        # its first push, but PIs may browse before the recorder runs.)
+        async with recorder.COACH_SESSIONS_GIT_LOCK:
+            if not tracker.exists():
+                rc, _, err = await recorder._run_subprocess(
+                    "git", "clone", recorder.COACH_SESSIONS_REPO_URL,
+                    str(tracker), timeout=120,
+                )
+                if rc != 0:
+                    logger.warning(f"PI browse: coach-sessions clone failed: {err}")
+        return
+    async with recorder.COACH_SESSIONS_GIT_LOCK:
+        rc, _, err = await recorder._run_subprocess(
+            "git", "pull", "--ff-only", cwd=tracker, timeout=30
+        )
+        if rc != 0:
+            logger.warning(f"PI browse: coach-sessions pull failed: {err}")
+
+
+def _build_index_tree(root: Path) -> dict[str, Any]:
+    """Walk `coach-sessions/<pi>/<project>/<student>/sessions/<ts>` and emit
+    `{pi: {project: {student: [session_ts, ...]}}}` sorted alphabetically /
+    by timestamp descending."""
+    tree: dict[str, dict[str, dict[str, list[str]]]] = {}
+    if not root.exists():
+        return tree
+    for pi_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        for project_dir in sorted(
+            p for p in pi_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
+        ):
+            for student_dir in sorted(
+                p for p in project_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
+            ):
+                sessions_dir = student_dir / "sessions"
+                if not sessions_dir.exists():
+                    continue
+                session_ts: list[str] = sorted(
+                    (s.name for s in sessions_dir.iterdir() if s.is_dir()),
+                    reverse=True,
+                )
+                if not session_ts:
+                    continue
+                tree.setdefault(pi_dir.name, {}).setdefault(
+                    project_dir.name, {}
+                )[student_dir.name] = session_ts
+    return tree
+
+
+@router.get("/index")
+async def get_index(
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """Return the {pi: {project: {student: [session_ts, ...]}}} tree."""
+    _validate_pi_passcode(x_pi_passcode, passcode)
+
+    now = time.monotonic()
+    cached = _index_cache.get("tree")
+    if cached is not None and now - _index_cache["ts"] < _INDEX_CACHE_TTL_SECONDS:
+        return {"tree": cached, "cached": True}
+
+    await _refresh_coach_sessions_clone()
+    tree = _build_index_tree(recorder.COACH_SESSIONS_DIR)
+    _index_cache["tree"] = tree
+    _index_cache["ts"] = now
+    return {"tree": tree, "cached": False}
+
+
+def _read_text_or_none(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_jsonl(path: Path) -> Optional[list[dict]]:
+    if not path.exists():
+        return None
+    out: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return out
+    except OSError:
+        return None
+
+
+def _read_json_or_none(path: Path) -> Optional[Any]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _resolve_session_dir(pi: str, project: str, student: str, ts: str) -> Path:
+    """Return the path to the on-disk session directory, validating that all
+    components stay inside coach-sessions root."""
+    _validate_slug(pi, "pi")
+    _validate_slug(project, "project")
+    _validate_slug(student, "student")
+    _validate_session_ts(ts)
+
+    root = recorder.COACH_SESSIONS_DIR.resolve()
+    target = (root / pi / project / student / "sessions" / ts).resolve()
+    if not target.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="Path traversal blocked")
+    return target
+
+
+@router.get("/session/{pi}/{project}/{student}/{ts}")
+async def get_session(
+    pi: str,
+    project: str,
+    student: str,
+    ts: str,
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """Return the full session bundle: summary, transcript, evaluation,
+    metadata, fast_eval_turns (may be null), cumulative_report, feedback."""
+    _validate_pi_passcode(x_pi_passcode, passcode)
+
+    session_dir = _resolve_session_dir(pi, project, student, ts)
+    if not session_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    student_root = session_dir.parent.parent  # drop /sessions/<ts>
+
+    return {
+        "summary": _read_text_or_none(session_dir / "summary.md"),
+        "transcript": _read_jsonl(session_dir / "transcript.jsonl") or [],
+        "evaluation": _read_text_or_none(session_dir / "evaluation.md"),
+        "metadata": _read_json_or_none(session_dir / "metadata.json"),
+        "fast_eval_turns": _read_jsonl(session_dir / "fast-eval-turns.jsonl"),
+        "cumulative_report": _read_text_or_none(student_root / "cumulative-report.md"),
+        "feedback": _read_json_or_none(session_dir / "feedback.json"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase A4 — Prompt history & content
+# ---------------------------------------------------------------------------
+
+
+_VALID_PROMPT_KEYS = {
+    "instructions": "instructions.md",
+    "instructions-v1": "instructions-v1.md",
+    "fast-eval": recorder.PROMPT_FILES["fast_eval"],
+    "deep-eval": recorder.PROMPT_FILES["deep_eval"],
+    "recorder": recorder.PROMPT_FILES["recorder"],
+}
+
+
+def _prompt_filename_for(key: str) -> str:
+    if key not in _VALID_PROMPT_KEYS:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Unknown prompt name: {key}. "
+                f"Valid: {sorted(_VALID_PROMPT_KEYS)}"
+            ),
+        )
+    return _VALID_PROMPT_KEYS[key]
+
+
+@router.get("/prompt-history/{prompt_name}")
+async def get_prompt_history(
+    prompt_name: str,
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """List commits on `main` that touched the named prompt file, newest
+    first. Cached for ~5 minutes."""
+    _validate_pi_passcode(x_pi_passcode, passcode)
+    filename = _prompt_filename_for(prompt_name)
+
+    now = time.monotonic()
+    cached = _prompt_history_cache.get(filename)
+    if cached is not None:
+        ts, payload = cached
+        if now - ts < _PROMPT_HISTORY_CACHE_TTL_SECONDS:
+            return {"history": payload, "cached": True}
+
+    api_url = (
+        f"https://api.github.com/repos/{recorder.REPO_OWNER}/{recorder.REPO_NAME}"
+        f"/commits"
+    )
+    params = {"path": f"public/{filename}", "sha": "main", "per_page": "100"}
+    headers = {"Accept": "application/vnd.github+json"}
+    import os
+    gh_token = os.environ.get("GITHUB_TOKEN")
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(api_url, params=params, headers=headers)
+            r.raise_for_status()
+            commits_payload = r.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"GitHub API error: {e}")
+
+    history: list[dict] = []
+    for c in commits_payload:
+        sha = c.get("sha")
+        commit_obj = c.get("commit") or {}
+        author = commit_obj.get("author") or {}
+        committed_at = author.get("date") or ""
+        message = (commit_obj.get("message") or "").splitlines()[0] if commit_obj.get("message") else ""
+        if sha:
+            history.append({
+                "sha": sha,
+                "committed_at": committed_at,
+                "commit_subject": message,
+            })
+
+    _prompt_history_cache[filename] = (now, history)
+    return {"history": history, "cached": False}
+
+
+@router.get("/prompt/{prompt_name}")
+async def get_prompt_at_sha(
+    prompt_name: str,
+    sha: str = Query(..., min_length=1, max_length=40),
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """Return the raw content of a prompt at `sha` (use the literal string
+    `live` for head-of-main)."""
+    _validate_pi_passcode(x_pi_passcode, passcode)
+    filename = _prompt_filename_for(prompt_name)
+
+    if sha == "live":
+        resolved_sha = await recorder.resolve_prompts_sha()
+    else:
+        if not re.match(r"^[0-9a-f]{7,40}$|^local:[0-9a-f]{1,40}$", sha):
+            raise HTTPException(status_code=400, detail="Bad sha format")
+        resolved_sha = sha
+
+    url = recorder._prompt_url_at(resolved_sha, filename)
+    try:
+        text = await recorder._fetch_prompt(url)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Prompt fetch failed: {e}")
+    return {"sha": resolved_sha, "filename": filename, "content": text}
+
+
+# ---------------------------------------------------------------------------
+# Phase A5 — Single-turn replay
+# ---------------------------------------------------------------------------
+
+
+def _slice_transcript_to_turn(
+    transcript: list[dict], turn: int
+) -> tuple[list[dict], dict]:
+    """Slice the transcript so the conversation looks like it did right
+    before the original `turn`-th user message was answered.
+
+    `turn` is 1-indexed and counts user messages. The slice contains every
+    message up to and including the `turn`-th user message, minus the
+    coach response that came after (if any).
+
+    Returns (sliced_messages, target_user_turn). Raises 400 on bad index.
+    """
+    user_indices = [i for i, t in enumerate(transcript) if t.get("role") == "user"]
+    if turn < 1 or turn > len(user_indices):
+        raise HTTPException(
+            status_code=400,
+            detail=f"turn {turn} out of range (1..{len(user_indices)})",
+        )
+    cutoff = user_indices[turn - 1]
+    sliced = transcript[: cutoff + 1]
+    return sliced, transcript[cutoff]
+
+
+def compose_coach_system_message(
+    base_prompt: str, fast_eval: Optional[str], deep_eval: Optional[str]
+) -> str:
+    """Compose the coach system message the same way `completion_proxy`
+    does. Kept here so the replay endpoint and the live endpoint can't
+    drift; `server.completion_proxy` calls into this too."""
+    sections: list[str] = []
+    if deep_eval:
+        sections.append(
+            "## Live evaluation (running)\n\n"
+            "_Auto-maintained across the session by the deep evaluator._\n\n"
+            f"{deep_eval}"
+        )
+    if fast_eval:
+        sections.append(
+            "## Live evaluation (this turn)\n\n"
+            "_Freshly computed for the moment about to unfold. Treat tactical flags "
+            "(coach_issues, open_threads) as a correction signal for the response "
+            "you are about to write._\n\n"
+            f"{fast_eval}"
+        )
+    if not sections:
+        return base_prompt
+    return base_prompt + "\n\n---\n\n" + "\n\n---\n\n".join(sections)
+
+
+class PromptSelector(BaseModel):
+    mode: str = Field(..., description="One of: original | sha | text")
+    value: Optional[str] = None
+
+
+class ReplayRequest(BaseModel):
+    pi: str
+    project: str
+    student: str
+    session_ts: str
+    turn: int
+    coach_prompt: PromptSelector
+    fast_eval_prompt: PromptSelector
+    deep_eval_prompt: PromptSelector
+    coach_model: Optional[str] = None
+    fast_eval_model: Optional[str] = None
+    deep_eval_model: Optional[str] = None
+
+
+async def _resolve_selector(
+    selector: PromptSelector, prompt_key: str, original_sha: Optional[str]
+) -> str:
+    """Resolve a PromptSelector → the prompt text to use."""
+    mode = selector.mode
+    if mode == "text":
+        if selector.value is None:
+            raise HTTPException(status_code=400, detail="mode=text requires value")
+        return selector.value
+    if mode == "original":
+        if not original_sha:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "mode=original is unavailable for this session "
+                    "(prompts_sha was not recorded)."
+                ),
+            )
+        return await recorder.fetch_prompt_for_session(prompt_key, original_sha)
+    if mode == "sha":
+        if not selector.value:
+            raise HTTPException(status_code=400, detail="mode=sha requires value")
+        sha_value = selector.value
+        if sha_value == "live":
+            sha_value = await recorder.resolve_prompts_sha()
+        if not re.match(r"^[0-9a-f]{7,40}$|^local:[0-9a-f]{1,40}$", sha_value):
+            raise HTTPException(status_code=400, detail="Bad sha format")
+        filename = recorder.PROMPT_FILES.get(prompt_key) or _VALID_PROMPT_KEYS.get(
+            prompt_key.replace("_", "-")
+        )
+        if not filename:
+            raise HTTPException(status_code=400, detail=f"Unknown prompt key {prompt_key}")
+        url = recorder._prompt_url_at(sha_value, filename)
+        return await recorder._fetch_prompt(url)
+    raise HTTPException(status_code=400, detail=f"Unknown selector mode: {mode}")
+
+
+async def _resolve_coach_prompt_selector(
+    selector: PromptSelector, original_sha: Optional[str]
+) -> str:
+    """Coach prompt is split between `instructions.md` and
+    `instructions-v1.md`. We resolve as-if the file is named `instructions.md`
+    by default; for `mode=sha` the caller supplies the SHA. The browser-side
+    coach uses one or the other depending on `recording-mode:`."""
+    mode = selector.mode
+    if mode == "text":
+        if selector.value is None:
+            raise HTTPException(status_code=400, detail="mode=text requires value")
+        return selector.value
+    # Use instructions-v1.md by default for "original"/SHA mode (the v1
+    # prompt is what the split-recording-mode coach actually loads).
+    filename = "instructions-v1.md"
+    if mode == "original":
+        if not original_sha:
+            raise HTTPException(
+                status_code=400,
+                detail="mode=original unavailable: prompts_sha not recorded.",
+            )
+        url = recorder._prompt_url_at(original_sha, filename)
+        return await recorder._fetch_prompt(url)
+    if mode == "sha":
+        if not selector.value:
+            raise HTTPException(status_code=400, detail="mode=sha requires value")
+        sha_value = selector.value
+        if sha_value == "live":
+            sha_value = await recorder.resolve_prompts_sha()
+        if not re.match(r"^[0-9a-f]{7,40}$|^local:[0-9a-f]{1,40}$", sha_value):
+            raise HTTPException(status_code=400, detail="Bad sha format")
+        url = recorder._prompt_url_at(sha_value, filename)
+        return await recorder._fetch_prompt(url)
+    raise HTTPException(status_code=400, detail=f"Unknown selector mode: {mode}")
+
+
+@router.post("/replay-turn")
+async def replay_turn(
+    body: ReplayRequest = Body(...),
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """Run deep-eval → fast-eval → coach for one historical turn, with
+    optional prompt and model overrides. Nothing is persisted to disk.
+    """
+    _validate_pi_passcode(x_pi_passcode, passcode)
+
+    session_dir = _resolve_session_dir(
+        body.pi, body.project, body.student, body.session_ts
+    )
+    if not session_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    transcript = _read_jsonl(session_dir / "transcript.jsonl") or []
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Session has no transcript")
+    metadata = _read_json_or_none(session_dir / "metadata.json") or {}
+
+    sliced, _ = _slice_transcript_to_turn(transcript, body.turn)
+    original_sha = metadata.get("prompts_sha") or None
+    project_id = metadata.get("project_id") or body.project
+    project_description = await recorder._fetch_project_description(project_id)
+
+    # ---- Step 1: deep-eval ----
+    deep_eval_prompt = await _resolve_selector(
+        body.deep_eval_prompt, "deep_eval", original_sha
+    )
+    rendered_deep_prompt = deep_eval_prompt.replace("${eval_mode}", "full")
+    deep_user = recorder._render_deep_eval_user_message(
+        eval_mode="full",
+        turns=sliced,
+        prior_eval="",
+        cumulative_report="",
+        project_description=project_description,
+    )
+    deep_model = body.deep_eval_model or (
+        metadata.get("models", {}).get("deep_eval") if isinstance(metadata.get("models"), dict) else None
+    ) or recorder.EVAL_MODEL
+    deep_msg = await recorder._openrouter_call(
+        model=deep_model,
+        system_prompt=rendered_deep_prompt,
+        user_message=deep_user,
+        tools=[recorder.DEEP_EVAL_TOOL_SCHEMA],
+        tool_choice={"type": "function", "function": {"name": "submit_evaluation"}},
+        timeout_seconds=recorder.DEEP_EVALUATOR_TIMEOUT_SECONDS,
+        kind="replay",
+        student_id=body.student,
+        project_id=project_id,
+    )
+    deep_args = recorder._extract_tool_args(deep_msg, "submit_evaluation") if deep_msg else None
+    deep_eval_md = recorder._render_deep_eval_markdown(deep_args) if deep_args else ""
+
+    # ---- Step 2: fast-eval ----
+    fast_eval_prompt = await _resolve_selector(
+        body.fast_eval_prompt, "fast_eval", original_sha
+    )
+    fast_user = recorder._render_fast_eval_user_message(
+        recent_turns=sliced[-4:], project_description=project_description
+    )
+    fast_model = body.fast_eval_model or (
+        metadata.get("models", {}).get("fast_eval") if isinstance(metadata.get("models"), dict) else None
+    ) or recorder.EVAL_MODEL
+    fast_msg = await recorder._openrouter_call(
+        model=fast_model,
+        system_prompt=fast_eval_prompt,
+        user_message=fast_user,
+        tools=[recorder.FAST_EVAL_TOOL_SCHEMA],
+        tool_choice={
+            "type": "function",
+            "function": {"name": "submit_fast_evaluation"},
+        },
+        timeout_seconds=recorder.FAST_EVAL_LLM_TIMEOUT_SECONDS,
+        kind="replay",
+        student_id=body.student,
+        project_id=project_id,
+    )
+    fast_args = recorder._extract_tool_args(fast_msg, "submit_fast_evaluation") if fast_msg else None
+    fast_eval_md = recorder._render_fast_eval_markdown(fast_args) if fast_args else ""
+
+    # ---- Step 3: coach ----
+    coach_prompt = await _resolve_coach_prompt_selector(
+        body.coach_prompt, original_sha
+    )
+    system_message = compose_coach_system_message(
+        coach_prompt, fast_eval_md or None, deep_eval_md or None
+    )
+    coach_model = body.coach_model or (
+        metadata.get("models", {}).get("coach") if isinstance(metadata.get("models"), dict) else None
+    ) or server_module.COACH_MODEL
+
+    if not server_module.OPENROUTER_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenRouter API key not configured on this server",
+        )
+
+    coach_messages = [{"role": "system", "content": system_message}]
+    for m in sliced:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = m.get("content", "")
+        coach_messages.append({"role": role, "content": content})
+    payload = {
+        "model": coach_model,
+        "messages": coach_messages,
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {server_module.OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://airesearchcoach.org",
+        "X-Title": "AI Research Coach (replay)",
+    }
+    coach_response_text = ""
+    coach_usage: dict = {}
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            data = r.json()
+            choices = data.get("choices") or []
+            if choices:
+                coach_response_text = choices[0].get("message", {}).get("content", "") or ""
+            coach_usage = data.get("usage") or {}
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Coach call failed: {e}")
+
+    pt = coach_usage.get("prompt_tokens")
+    ct = coach_usage.get("completion_tokens")
+    logger.info(
+        f"usage kind=replay student={body.student} project={project_id} "
+        f"model={coach_model} prompt_tokens={pt} completion_tokens={ct}"
+    )
+
+    return {
+        "deep_eval_md": deep_eval_md,
+        "deep_eval_args": deep_args,
+        "fast_eval_md": fast_eval_md,
+        "fast_eval_args": fast_args,
+        "coach_response": coach_response_text,
+        "coach_system_message": system_message,
+        "models_used": {
+            "coach": coach_model,
+            "fast_eval": fast_model,
+            "deep_eval": deep_model,
+        },
+        "original_prompts_sha": original_sha,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase A6 — Feedback write/read
+# ---------------------------------------------------------------------------
+
+
+_FEEDBACK_SCHEMA: dict[str, list] = {
+    "session_ratings": [],
+    "turn_annotations": [],
+    "coach_issue_reviews": [],
+}
+
+
+_VALID_SESSION_RATINGS = {"great", "ok", "poor"}
+_VALID_TURN_TAGS = {"coach_problem", "coach_good", "student_issue", "note"}
+_VALID_VERDICTS = {"agree", "disagree", "partial"}
+
+
+class FeedbackBase(BaseModel):
+    pi: str
+    project: str
+    student: str
+    session_ts: str
+    reviewer: str = Field(..., min_length=1, max_length=80)
+    note: Optional[str] = ""
+    supersedes: Optional[str] = None
+    retracted: Optional[bool] = None
+
+
+class SessionFeedback(FeedbackBase):
+    rating: str  # "great" | "ok" | "poor"
+
+
+class TurnFeedback(FeedbackBase):
+    turn: int = Field(..., ge=1)
+    tag: str  # coach_problem | coach_good | student_issue | note
+
+
+class IssueFeedback(FeedbackBase):
+    turn: int = Field(..., ge=1)
+    issue_category: str
+    verdict: str  # agree | disagree | partial
+
+
+def _ensure_feedback_schema(data: Optional[dict]) -> dict:
+    if not isinstance(data, dict):
+        data = {}
+    out = dict(_FEEDBACK_SCHEMA)
+    for k in _FEEDBACK_SCHEMA:
+        existing = data.get(k)
+        out[k] = list(existing) if isinstance(existing, list) else []
+    return out
+
+
+async def _append_feedback_entry(
+    *,
+    pi: str,
+    project: str,
+    student: str,
+    session_ts: str,
+    reviewer: str,
+    section: str,
+    entry_payload: dict,
+) -> dict:
+    """Common feedback-write path. Acquires the shared coach-sessions git
+    lock, pulls, reads or initializes feedback.json, appends, commits, and
+    pushes."""
+    session_dir = _resolve_session_dir(pi, project, student, session_ts)
+    if not session_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    feedback_path = session_dir / "feedback.json"
+    tracker = recorder.COACH_SESSIONS_DIR
+
+    new_id = str(uuid.uuid4())
+    full_entry = {
+        "id": new_id,
+        "reviewer": reviewer,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **entry_payload,
+    }
+
+    async with recorder.COACH_SESSIONS_GIT_LOCK:
+        # Best-effort pull so we don't write on top of a stale local view.
+        rc, _, err = await recorder._run_subprocess(
+            "git", "pull", "--ff-only", cwd=tracker, timeout=30
+        )
+        if rc != 0:
+            logger.warning(f"feedback POST: pull failed (continuing): {err}")
+
+        existing = _read_json_or_none(feedback_path)
+        data = _ensure_feedback_schema(existing)
+        data.setdefault(section, []).append(full_entry)
+        try:
+            feedback_path.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"feedback write failed: {e}")
+
+        rel = feedback_path.relative_to(tracker)
+        rc, _, err = await recorder._run_subprocess(
+            "git", "add", str(rel), cwd=tracker, timeout=15
+        )
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"git add failed: {err}")
+
+        rc, status_out, _ = await recorder._run_subprocess(
+            "git", "status", "--porcelain", cwd=tracker, timeout=10
+        )
+        if not status_out.strip():
+            # Nothing changed (race? identical content?); still report success.
+            return {"id": new_id, "committed": False}
+
+        commit_msg = f"pi feedback: {reviewer} on {pi}/{project}/{student}/{session_ts}"
+        rc, _, err = await recorder._run_subprocess(
+            "git", "commit", "-m", commit_msg, cwd=tracker, timeout=30
+        )
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"git commit failed: {err}")
+
+        rc, _, err = await recorder._run_subprocess(
+            "git", "push", cwd=tracker, timeout=60
+        )
+        if rc != 0:
+            logger.warning(f"feedback POST: push failed: {err}")
+            return {"id": new_id, "committed": True, "pushed": False, "push_error": err}
+
+    # Bust the index cache so the new feedback is visible immediately.
+    _index_cache["ts"] = 0.0
+    return {"id": new_id, "committed": True, "pushed": True}
+
+
+@router.post("/feedback/session")
+async def post_session_feedback(
+    body: SessionFeedback,
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    _validate_pi_passcode(x_pi_passcode, passcode)
+    if body.rating not in _VALID_SESSION_RATINGS:
+        raise HTTPException(status_code=400, detail=f"rating must be one of {sorted(_VALID_SESSION_RATINGS)}")
+    payload = {
+        "rating": body.rating,
+        "note": body.note or "",
+    }
+    if body.supersedes:
+        payload["supersedes"] = body.supersedes
+    if body.retracted:
+        payload["retracted"] = True
+    return await _append_feedback_entry(
+        pi=body.pi,
+        project=body.project,
+        student=body.student,
+        session_ts=body.session_ts,
+        reviewer=body.reviewer,
+        section="session_ratings",
+        entry_payload=payload,
+    )
+
+
+@router.post("/feedback/turn")
+async def post_turn_feedback(
+    body: TurnFeedback,
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    _validate_pi_passcode(x_pi_passcode, passcode)
+    if body.tag not in _VALID_TURN_TAGS:
+        raise HTTPException(status_code=400, detail=f"tag must be one of {sorted(_VALID_TURN_TAGS)}")
+    payload = {
+        "turn": body.turn,
+        "tag": body.tag,
+        "note": body.note or "",
+    }
+    if body.supersedes:
+        payload["supersedes"] = body.supersedes
+    if body.retracted:
+        payload["retracted"] = True
+    return await _append_feedback_entry(
+        pi=body.pi,
+        project=body.project,
+        student=body.student,
+        session_ts=body.session_ts,
+        reviewer=body.reviewer,
+        section="turn_annotations",
+        entry_payload=payload,
+    )
+
+
+@router.post("/feedback/issue")
+async def post_issue_feedback(
+    body: IssueFeedback,
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    _validate_pi_passcode(x_pi_passcode, passcode)
+    if body.verdict not in _VALID_VERDICTS:
+        raise HTTPException(status_code=400, detail=f"verdict must be one of {sorted(_VALID_VERDICTS)}")
+    if body.issue_category not in recorder.COACH_ISSUE_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown issue_category: {body.issue_category}",
+        )
+    payload = {
+        "turn": body.turn,
+        "issue_category": body.issue_category,
+        "verdict": body.verdict,
+        "note": body.note or "",
+    }
+    if body.supersedes:
+        payload["supersedes"] = body.supersedes
+    if body.retracted:
+        payload["retracted"] = True
+    return await _append_feedback_entry(
+        pi=body.pi,
+        project=body.project,
+        student=body.student,
+        session_ts=body.session_ts,
+        reviewer=body.reviewer,
+        section="coach_issue_reviews",
+        entry_payload=payload,
+    )
