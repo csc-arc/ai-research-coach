@@ -1,7 +1,7 @@
 import InfoIcon from '@mui/icons-material/Info';
 import EditIcon from '@mui/icons-material/Edit';
-import { AppBar, Box, createTheme, CssBaseline, IconButton, ThemeProvider, Toolbar, Typography, Button } from '@mui/material';
-import { useCallback, useEffect, useState } from 'react';
+import { Alert, AppBar, Box, createTheme, CssBaseline, IconButton, ThemeProvider, Toolbar, Typography, Button } from '@mui/material';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AboutDialog from './components/About/AboutDialog';
 import { AIResearchCoachChatPanel } from './components/Chat/ChatPanel';
 import { MainLayout } from './components/Layout/MainLayout';
@@ -10,6 +10,9 @@ import logoIcon from '/logo-white.svg';
 import { useOutputs } from './outputs/useOutputs';
 import { OutputPanel } from './components/Outputs/OutputPanel';
 import { EditLocalInstructionsDialog } from './components/Instructions/EditLocalInstructionsDialog';
+import { getServerUrl } from './serverConfig';
+import { getOrPromptPasscode } from './chat/passcodeStorage';
+import { ChatMessage } from './react-ai-chat';
 
 // Create a custom theme with better colors for diffs
 const theme = createTheme({
@@ -92,6 +95,22 @@ const parseSuggestionsEnabled = (text: string): boolean => {
   return true; // Default to true if not specified
 };
 
+// Parse the "recording-mode:" line from instructions. When omitted (alpha
+// instructions) we default to "alpha". v1 instructions opt in with "split".
+type RecordingMode = 'alpha' | 'split';
+const parseRecordingMode = (text: string): RecordingMode => {
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.toLowerCase().startsWith('recording-mode:')) {
+      const value = trimmed.substring(trimmed.indexOf(':') + 1).trim().toLowerCase();
+      if (value === 'split') return 'split';
+      if (value === 'alpha') return 'alpha';
+    }
+  }
+  return 'alpha';
+};
+
 // Process instructions: validate params and substitute
 const processInstructions = (
   templateText: string,
@@ -148,6 +167,26 @@ const useInstructionsUrlFromQuery = (): string | null => {
   return instructionsUrl;
 };
 
+interface SessionInit {
+  studentId: string;
+  projectId: string;
+  pi: string;
+  sessionStart: string;
+  firstVisit: boolean;
+  resumed: boolean;
+  projectDescription: string;
+  cumulativeReport: string;
+  lastSessionSummary: string;
+  coachStyleNotes: string;
+  chatLog: { role: 'user' | 'assistant'; content: string; timestamp: string }[];
+}
+
+interface SessionState {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  init?: SessionInit;
+  error?: string;
+}
+
 function AppContent() {
   const outputsHook = useOutputs();
   const outputEmitter = outputsHook.createEmitter();
@@ -157,7 +196,128 @@ function AppContent() {
 
   const instructionsUrl = useInstructionsUrlFromQuery();
 
-  const { instructions, instructionsError, instructionsLoading, suggestionsEnabled, reloadInstructions } = useInstructions(instructionsUrl);
+  const { instructions, instructionsError, instructionsLoading, suggestionsEnabled, reloadInstructions, recordingMode, rawTemplate } = useInstructions(instructionsUrl);
+
+  const queryParams = useMemo(() => getAllQueryParameters(), []);
+
+  // For recording-mode=split, run /api/start-session before mounting the chat,
+  // and use the response to fill template substitutions and rehydrate the
+  // visible chat on resume.
+  const [sessionState, setSessionState] = useState<SessionState>({ status: 'idle' });
+  const [sessionRetryToken, setSessionRetryToken] = useState(0);
+
+  useEffect(() => {
+    if (recordingMode !== 'split') {
+      setSessionState({ status: 'idle' });
+      return;
+    }
+    if (!queryParams.student_id || !queryParams.project_id) {
+      setSessionState({
+        status: 'error',
+        error: 'student_id and project_id are required for v1 (split recording mode).',
+      });
+      return;
+    }
+    let cancelled = false;
+    const start = async () => {
+      setSessionState({ status: 'loading' });
+      const serverUrl = getServerUrl();
+      const passcode = await getOrPromptPasscode(serverUrl);
+      if (cancelled) return;
+      if (!passcode) {
+        setSessionState({ status: 'error', error: 'Passcode is required to start a session.' });
+        return;
+      }
+      try {
+        const response = await fetch(`${serverUrl}/api/start-session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            passcode,
+            student_id: queryParams.student_id,
+            project_id: queryParams.project_id,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!response.ok || !data.success) {
+          const detail = data?.error || data?.detail || `${response.status} ${response.statusText}`;
+          setSessionState({ status: 'error', error: detail });
+          return;
+        }
+        setSessionState({
+          status: 'ready',
+          init: {
+            studentId: queryParams.student_id,
+            projectId: queryParams.project_id,
+            pi: data.pi || queryParams.pi || '',
+            sessionStart: data.session_start,
+            firstVisit: !!data.first_visit,
+            resumed: !!data.resumed,
+            projectDescription: data.project_description || '',
+            cumulativeReport: data.cumulative_report || '',
+            lastSessionSummary: data.last_session_summary || '',
+            coachStyleNotes: data.coach_style_notes || '',
+            chatLog: Array.isArray(data.chat_log) ? data.chat_log : [],
+          },
+        });
+      } catch (e) {
+        if (cancelled) return;
+        const msg = e instanceof Error ? e.message : 'Unknown error';
+        setSessionState({ status: 'error', error: `Failed to start session: ${msg}` });
+      }
+    };
+    start();
+    return () => {
+      cancelled = true;
+    };
+  }, [recordingMode, queryParams.student_id, queryParams.project_id, queryParams.pi, sessionRetryToken]);
+
+  // Once /api/start-session has succeeded for split mode, substitute the new
+  // session-derived params into the raw template and re-process.
+  const splitInstructions = useMemo(() => {
+    if (recordingMode !== 'split') return null;
+    if (sessionState.status !== 'ready' || !sessionState.init || !rawTemplate) return null;
+    const allParams: Record<string, string> = {
+      ...queryParams,
+      student_id: sessionState.init.studentId,
+      project_id: sessionState.init.projectId,
+      pi: sessionState.init.pi,
+      session_start: sessionState.init.sessionStart,
+      first_visit: sessionState.init.firstVisit ? 'true' : 'false',
+      project_description: sessionState.init.projectDescription,
+      cumulative_report: sessionState.init.cumulativeReport,
+      last_session_summary: sessionState.init.lastSessionSummary,
+      coach_style_notes: sessionState.init.coachStyleNotes,
+    };
+    return processInstructions(rawTemplate, allParams);
+  }, [recordingMode, sessionState, queryParams, rawTemplate]);
+
+  // Effective values shown to the chat panel.
+  const effectiveInstructions = recordingMode === 'split'
+    ? (splitInstructions?.text ?? null)
+    : instructions;
+  const effectiveInstructionsError = recordingMode === 'split'
+    ? (sessionState.status === 'error'
+        ? sessionState.error ?? 'Failed to start session'
+        : (splitInstructions && !splitInstructions.success ? splitInstructions.error : instructionsError))
+    : instructionsError;
+  const effectiveInstructionsLoading = recordingMode === 'split'
+    ? (instructionsLoading || sessionState.status === 'loading' || sessionState.status === 'idle')
+    : instructionsLoading;
+
+  // Rehydrate chat from server's chat_log when resumed===true.
+  const rehydratedChat = useMemo(() => {
+    if (recordingMode !== 'split') return null;
+    if (sessionState.status !== 'ready' || !sessionState.init) return null;
+    if (!sessionState.init.resumed) return null;
+    const messages: ChatMessage[] = sessionState.init.chatLog.map((m) =>
+      m.role === 'user'
+        ? { role: 'user', content: m.content }
+        : { role: 'assistant', content: m.content }
+    );
+    return messages;
+  }, [recordingMode, sessionState]);
 
   const handleInstructions = useCallback(
     (url: string | null, identity?: WelcomeIdentity) => {
@@ -234,16 +394,48 @@ function AppContent() {
     );
   }
 
-  const leftPanel = (
+  // For split mode, render an error/retry banner instead of the chat when
+  // session start fails. The chat does not mount until /api/start-session
+  // returns successfully.
+  const splitSessionFailed =
+    recordingMode === 'split' && sessionState.status === 'error';
+
+  const leftPanel = splitSessionFailed ? (
+    <Box sx={{ p: 3, height: '100%', overflow: 'auto' }}>
+      <Alert
+        severity="error"
+        action={
+          <Button
+            color="inherit"
+            size="small"
+            onClick={() => setSessionRetryToken((t) => t + 1)}
+          >
+            Retry
+          </Button>
+        }
+      >
+        <Typography variant="subtitle2" gutterBottom>
+          Could not start session
+        </Typography>
+        <Typography variant="body2">
+          {sessionState.error || 'Unknown error'}
+        </Typography>
+      </Alert>
+    </Box>
+  ) : (
     <AIResearchCoachChatPanel
-      instructions={instructions}
-      instructionsError={instructionsError}
-      instructionsLoading={instructionsLoading}
+      instructions={effectiveInstructions}
+      instructionsError={effectiveInstructionsError}
+      instructionsLoading={effectiveInstructionsLoading}
       suggestionsEnabled={suggestionsEnabled}
       outputEmitter={outputEmitter}
       requestApproval={outputsHook.requestApproval}
       updateServerHealth={outputsHook.updateServerHealth}
       updateExecutionStatus={outputsHook.updateExecutionStatus}
+      recordingMode={recordingMode}
+      pi={sessionState.init?.pi || queryParams.pi}
+      sessionStart={sessionState.init?.sessionStart}
+      rehydratedMessages={rehydratedChat ?? undefined}
     />
   )
 
@@ -384,12 +576,16 @@ const useInstructions = (url: string | null) => {
   const [instructionsError, setInstructionsError] = useState<string | null>(null);
   const [instructionsLoading, setInstructionsLoading] = useState<boolean>(false);
   const [suggestionsEnabled, setSuggestionsEnabled] = useState<boolean>(true);
+  const [recordingMode, setRecordingMode] = useState<RecordingMode>('alpha');
+  const [rawTemplate, setRawTemplate] = useState<string | null>(null);
   const [reloadTrigger, setReloadTrigger] = useState(0);
 
   useEffect(() => {
     if (!url) {
       setInstructions(null);
       setInstructionsError(null);
+      setRawTemplate(null);
+      setRecordingMode('alpha');
       return;
     }
 
@@ -407,20 +603,31 @@ const useInstructions = (url: string | null) => {
         
         // Parse suggestions-enabled setting
         setSuggestionsEnabled(parseSuggestionsEnabled(templateText));
-        
-        // Process with parameters
-        const result = processInstructions(templateText, queryParams);
-        if (result.success) {
-          setInstructions(result.text);
+        const mode = parseRecordingMode(templateText);
+        setRecordingMode(mode);
+        setRawTemplate(templateText);
+
+        // For split mode, defer parameter substitution to App.tsx after
+        // /api/start-session returns. Don't surface "missing parameters"
+        // errors from URL-only substitution.
+        if (mode === 'split') {
+          setInstructions(null);
           setInstructionsError(null);
         } else {
-          setInstructions(null);
-          setInstructionsError(result.error);
+          const result = processInstructions(templateText, queryParams);
+          if (result.success) {
+            setInstructions(result.text);
+            setInstructionsError(null);
+          } else {
+            setInstructions(null);
+            setInstructionsError(result.error);
+          }
         }
       } else {
         console.info('No local instructions found for:', name);
         setInstructions(`No local instructions found for "${name}". Click "Edit Instructions" to create them.`);
         setInstructionsError(null);
+        setRawTemplate(null);
       }
       setInstructionsLoading(false);
       return;
@@ -434,15 +641,22 @@ const useInstructions = (url: string | null) => {
       
       // Parse suggestions-enabled setting
       setSuggestionsEnabled(parseSuggestionsEnabled(cachedTemplate));
-      
-      // Process with parameters
-      const result = processInstructions(cachedTemplate, queryParams);
-      if (result.success) {
-        setInstructions(result.text);
+      const cachedMode = parseRecordingMode(cachedTemplate);
+      setRecordingMode(cachedMode);
+      setRawTemplate(cachedTemplate);
+
+      if (cachedMode === 'split') {
+        setInstructions(null);
         setInstructionsError(null);
       } else {
-        setInstructions(null);
-        setInstructionsError(result.error);
+        const result = processInstructions(cachedTemplate, queryParams);
+        if (result.success) {
+          setInstructions(result.text);
+          setInstructionsError(null);
+        } else {
+          setInstructions(null);
+          setInstructionsError(result.error);
+        }
       }
       setInstructionsLoading(false);
       return;
@@ -465,18 +679,25 @@ const useInstructions = (url: string | null) => {
           
           // Parse suggestions-enabled setting
           setSuggestionsEnabled(parseSuggestionsEnabled(templateText));
-          
+          const fetchedMode = parseRecordingMode(templateText);
+          setRecordingMode(fetchedMode);
+          setRawTemplate(templateText);
+
           // Cache the raw template
           setCachedInstructions(url, templateText);
           
-          // Process with parameters
-          const result = processInstructions(templateText, queryParams);
-          if (result.success) {
-            setInstructions(result.text);
+          if (fetchedMode === 'split') {
+            setInstructions(null);
             setInstructionsError(null);
           } else {
-            setInstructions(null);
-            setInstructionsError(result.error);
+            const result = processInstructions(templateText, queryParams);
+            if (result.success) {
+              setInstructions(result.text);
+              setInstructionsError(null);
+            } else {
+              setInstructions(null);
+              setInstructionsError(result.error);
+            }
           }
         }
       } catch (error) {
@@ -503,7 +724,15 @@ const useInstructions = (url: string | null) => {
     setReloadTrigger(prev => prev + 1);
   }, []);
 
-  return { instructions, instructionsError, instructionsLoading, suggestionsEnabled, reloadInstructions };
+  return {
+    instructions,
+    instructionsError,
+    instructionsLoading,
+    suggestionsEnabled,
+    recordingMode,
+    rawTemplate,
+    reloadInstructions,
+  };
 };
 
 const filterInstructionsUrl = (url: string): string => {

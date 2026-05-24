@@ -25,6 +25,7 @@ import SuggestedPrompts from "./SuggestedPrompts";
 import CompressConfirmDialog from "./CompressConfirmDialog";
 import ChatSettingsDialog from "./ChatSettingsDialog";
 import useChat from "../hooks/useChat";
+import { useTypingEffect } from "../hooks/useTypingEffect";
 import { ChatPanelProps } from "../types";
 
 export function ChatPanel({
@@ -43,12 +44,15 @@ export function ChatPanel({
   enableExport = true,
   enableModelSelection = true,
   onMessageSent,
+  onUserMessageSubmit,
+  onAssistantMessagesSettled,
   onError,
   onChatCleared,
   onModelChange,
   isLoading = false,
   hideToolDetails = false,
   autoStartConversation = false,
+  initialMessages,
 }: ChatPanelProps) {
   const {
     chat,
@@ -83,6 +87,24 @@ export function ChatPanel({
 
   // Guard so we fire at most once per mount, even if conditions change multiple times
   const hasAutoStartedRef = useRef(false);
+  const hasRehydratedRef = useRef(false);
+
+  // One-shot rehydration: when `initialMessages` is provided on first render
+  // with at least one message, call loadChat with them. Subsequent changes
+  // are ignored. This must run before auto-start so a resumed session does
+  // not trigger a duplicate greeting.
+  useEffect(() => {
+    if (hasRehydratedRef.current) return;
+    if (!initialMessages || initialMessages.length === 0) return;
+    hasRehydratedRef.current = true;
+    // Mark auto-start as already-fired so resumed sessions don't re-greet.
+    hasAutoStartedRef.current = true;
+    loadChat({
+      messages: initialMessages,
+      totalUsage: { promptTokens: 0, completionTokens: 0, estimatedCost: 0 },
+      model: defaultModel || availableModels[0]?.model || "default",
+    });
+  }, [initialMessages, loadChat, defaultModel, availableModels]);
 
   // Auto-start: trigger agent greeting when conditions are met on cold-start.
   // Fires only when autoStartConversation is true, the chat has no messages yet,
@@ -111,7 +133,19 @@ export function ChatPanel({
     }
   }, [error, onError]);
 
-  // All messages including partial response
+  // Extract the full streamed text from the last in-progress assistant message.
+  // useTypingEffect drips this to the display at a natural pace.
+  const inProgressAssistantContent = (() => {
+    if (!responding || !partialResponse) return "";
+    const last = partialResponse[partialResponse.length - 1];
+    return last?.role === "assistant" && typeof last.content === "string"
+      ? last.content
+      : "";
+  })();
+  const displayedContent = useTypingEffect(inProgressAssistantContent, responding);
+
+  // All messages including partial response (last in-progress assistant message
+  // uses the typed/dripped content rather than the full streamed content)
   const allMessages = useMemo(() => {
     const messages = chat.messages.map((m) => ({
       message: m,
@@ -120,11 +154,20 @@ export function ChatPanel({
     if (responding && partialResponse) {
       return [
         ...messages,
-        ...partialResponse.map((m) => ({ message: m, inProgress: true })),
+        ...partialResponse.map((m, i) => {
+          if (
+            i === partialResponse.length - 1 &&
+            m.role === "assistant" &&
+            typeof m.content === "string"
+          ) {
+            return { message: { ...m, content: displayedContent }, inProgress: true };
+          }
+          return { message: m, inProgress: true };
+        }),
       ];
     }
     return messages;
-  }, [chat.messages, responding, partialResponse]);
+  }, [chat.messages, responding, partialResponse, displayedContent]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -133,13 +176,76 @@ export function ChatPanel({
     }
   }, [allMessages]);
 
-  const handleSubmit = useCallback(() => {
+  // Track which assistant messages have already been forwarded to
+  // onAssistantMessagesSettled so we don't double-log on every rerender.
+  // We only fire the callback for messages that arrived during a "real"
+  // turn — i.e., a transition from responding=true to responding=false.
+  // External setChat() calls (loadChat, replace_with_summary) advance the
+  // index without firing.
+  const lastSettledIndexRef = useRef<number>(-1);
+  const wasRespondingRef = useRef<boolean>(false);
+
+  const handleSubmit = useCallback(async () => {
     if (newPrompt.trim() === "" || responding || compressing) return;
     const message = newPrompt.trim();
-    submitUserMessage(message);
     setNewPrompt("");
+    // Log the user turn synchronously before the completion call so the
+    // fast-eval-awaited-by-completion design works. Failures must never
+    // block the chat — the callback itself is responsible for swallowing
+    // its errors and surfacing console warnings.
+    if (onUserMessageSubmit) {
+      try {
+        await onUserMessageSubmit(message);
+      } catch (e) {
+        console.warn("onUserMessageSubmit failed:", e);
+      }
+    }
+    submitUserMessage(message);
     onMessageSent?.(message);
-  }, [newPrompt, submitUserMessage, responding, compressing, onMessageSent]);
+  }, [newPrompt, submitUserMessage, responding, compressing, onMessageSent, onUserMessageSubmit]);
+
+  // Fire onAssistantMessagesSettled when assistant turns settle. We only
+  // forward messages with index > lastSettledIndexRef.current so multiple
+  // settles inside a single tool-loop don't re-emit the same assistant
+  // message. User messages are intentionally not included here — they are
+  // already logged at submit time.
+  useEffect(() => {
+    if (responding) {
+      wasRespondingRef.current = true;
+      return;
+    }
+    const justSettled = wasRespondingRef.current;
+    wasRespondingRef.current = false;
+
+    if (!justSettled || !onAssistantMessagesSettled) {
+      // Either we never started a real turn (loadChat / clearChat / mount)
+      // or the consumer doesn't care — advance the index silently so a
+      // future genuine settle doesn't re-emit historical messages.
+      lastSettledIndexRef.current = chat.messages.length - 1;
+      return;
+    }
+    const start = lastSettledIndexRef.current + 1;
+    lastSettledIndexRef.current = chat.messages.length - 1;
+    if (start >= chat.messages.length) return;
+    const settled: typeof chat.messages = [];
+    for (let i = start; i < chat.messages.length; i++) {
+      const m = chat.messages[i];
+      if (m.role === "assistant") {
+        settled.push(m);
+      }
+    }
+    if (settled.length > 0) {
+      onAssistantMessagesSettled(settled);
+    }
+  }, [chat.messages, responding, onAssistantMessagesSettled]);
+
+  // Reset the settled-index tracker when the chat is cleared.
+  useEffect(() => {
+    if (chat.messages.length === 0) {
+      lastSettledIndexRef.current = -1;
+      wasRespondingRef.current = false;
+    }
+  }, [chat.messages.length]);
 
   const handleNewChat = useCallback(() => {
     clearChat();

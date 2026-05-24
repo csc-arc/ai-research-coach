@@ -9,8 +9,8 @@ Forked from [magland/chatgeneral](https://github.com/magland/chatgeneral).
 ```
 +---------------------------+        HTTPS         +---------------------------+
 | Browser (GitHub Pages)    |  /api/run-script ─▶  | FastAPI on droplet        |
-| https://arc-csc.github.io |  /files/...      ─▶  | airesearchcoach-server    |
-| /ai-research-coach/       |  /api/completion ─▶  | .airesearchcoach.org      |
+| https://airesearchcoach   |  /files/...      ─▶  | airesearchcoach-server    |
+| .org                      |  /api/completion ─▶  | .airesearchcoach.org      |
 |                           |  /health         ─▶  |                           |
 +---------------------------+                      +-------------+-------------+
                                                                  │ OPENROUTER_API_KEY (server-side)
@@ -20,7 +20,7 @@ Forked from [magland/chatgeneral](https://github.com/magland/chatgeneral).
 
 LLM completions are proxied through the droplet's own `/api/completion` endpoint.
 The OpenRouter API key lives exclusively in the server's environment — the browser
-never sees it. The model is fixed to `anthropic/claude-4.5-sonnet`.
+never sees it.
 
 Each student is identified by a `student_id` and a `project_id`. The backend creates and uses:
 
@@ -39,7 +39,7 @@ npm install
 npm run dev
 ```
 
-Vite dev server runs at `http://localhost:5173/ai-research-coach/`. CORS for that origin is allowed by the backend by default.
+Vite dev server runs at `http://localhost:5173/`. CORS for that origin is allowed by the backend by default.
 
 ### Build
 
@@ -47,7 +47,7 @@ Vite dev server runs at `http://localhost:5173/ai-research-coach/`. CORS for tha
 npm run build
 ```
 
-Static output is in `dist/`. The Vite `base` is `/ai-research-coach/`, so deploying to `https://arc-csc.github.io/ai-research-coach/` works out of the box.
+Static output is in `dist/`. The Vite `base` is `/`, deploying to `https://airesearchcoach.org`.
 
 ### Settings the user must enter
 
@@ -101,65 +101,76 @@ Flags:
 
 ## Deploying the backend to a droplet
 
-1. Provision a droplet (e.g., Ubuntu 22.04). Point DNS `airesearchcoach-server.airesearchcoach.org` at the droplet's IP.
-2. Install Python 3.10+ and this package:
+> **Existing deployment:** see `notes/droplet-setup.md` in the workspace for the
+> canonical record of the live server configuration (paths, venv, secrets file name,
+> service user). The instructions below are for a fresh install.
+
+1. Provision a droplet (Ubuntu 22.04+). Point DNS `airesearchcoach-server.airesearchcoach.org` at the droplet's IP.
+
+2. Install dependencies and clone the repo:
 
    ```bash
-   git clone https://github.com/arc-csc/ai-research-coach.git
-   cd ai-research-coach/python/ai-research-coach
-   pip install -e .
+   sudo apt install -y python3 python3-pip python3-venv git nginx certbot python3-certbot-nginx
+   sudo install -d -o deploy -g deploy /opt/ai-research-coach /opt/arc-venv
+   git clone git@github.com:csc-arc/ai-research-coach.git /opt/ai-research-coach
+   python3 -m venv /opt/arc-venv
+   /opt/arc-venv/bin/pip install -e /opt/ai-research-coach/python/ai-research-coach
    ```
 
-3. Create a secrets file readable only by root, then create a `systemd` unit:
+   **Never use bare `pip`** — always `/opt/arc-venv/bin/pip`.
+
+3. Create the workspace root and secrets file:
 
    ```bash
-   sudo mkdir -p /etc/ai-research-coach
-   sudo tee /etc/ai-research-coach/secrets.env > /dev/null <<'EOF'
-   AIRC_PASSCODE=replace-me
+   sudo mkdir -p /srv/ai-research-coach && sudo chown deploy:deploy /srv/ai-research-coach
+   sudo tee /etc/ai-research-coach.env > /dev/null <<'EOF'
+   ARC_PASSCODE=replace-me
    OPENROUTER_API_KEY=sk-or-v1-...
    EOF
-   sudo chmod 600 /etc/ai-research-coach/secrets.env
-   sudo chown root:root /etc/ai-research-coach/secrets.env
+   sudo chmod 600 /etc/ai-research-coach.env
+   sudo chown deploy:deploy /etc/ai-research-coach.env
    ```
 
+   `OPENROUTER_API_KEY` is read from the environment — it is not passed as a CLI flag.
+   If missing, the service starts but completions return 503. The startup log prints
+   `OpenRouter key: configured` or `NOT SET` to confirm.
+
+4. Create the systemd unit at `/etc/systemd/system/ai-research-coach.service`:
+
    ```ini
-   # /etc/systemd/system/ai-research-coach.service
    [Unit]
-   Description=AI Research Coach script execution server
+   Description=AI Research Coach FastAPI backend
    After=network.target
 
    [Service]
    Type=simple
-   User=arc
+   User=deploy
    WorkingDirectory=/srv/ai-research-coach
-   EnvironmentFile=/etc/ai-research-coach/secrets.env
-   ExecStart=/usr/local/bin/ai-research-coach start-server \
+   EnvironmentFile=/etc/ai-research-coach.env
+   ExecStart=/opt/arc-venv/bin/ai-research-coach start-server \
      --host 127.0.0.1 \
      --port 3339 \
      --working-dir /srv/ai-research-coach \
-     --passcode ${AIRC_PASSCODE} \
+     --passcode ${ARC_PASSCODE} \
      --allow-origin https://airesearchcoach.org
    Restart=on-failure
+   RestartSec=5
 
    [Install]
    WantedBy=multi-user.target
    ```
 
-   Use `EnvironmentFile=` rather than inline `Environment=` — the latter
-   shows the key value in `systemctl show` output. To rotate the key, edit
-   `secrets.env` and run `sudo systemctl restart ai-research-coach`.
-
-4. Put **Caddy** (or nginx) in front to terminate TLS:
-
-   ```caddy
-   airesearchcoach-server.airesearchcoach.org {
-       reverse_proxy 127.0.0.1:3339
-   }
+   ```bash
+   sudo systemctl daemon-reload && sudo systemctl enable --now ai-research-coach
+   curl http://localhost:3339/health
    ```
 
-   Caddy auto-issues a Let's Encrypt cert for the domain.
+5. Put **nginx** in front to terminate TLS (certbot handles the cert):
 
-5. Open port 443 in the droplet firewall; keep 3339 closed externally.
+   ```bash
+   sudo certbot --nginx -d airesearchcoach-server.airesearchcoach.org
+   sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
+   ```
 
 6. Verify:
 
@@ -169,9 +180,9 @@ Flags:
 
 ## Deploying the frontend to GitHub Pages
 
-The included `.github/workflows/deploy.yml` builds the Vite app and publishes `dist/` on push to `main`. In the GitHub repository settings, set **Pages → Source → GitHub Actions**.
+The included `.github/workflows/deploy.yml` builds the Vite app and publishes `dist/` on push to `main`. In the GitHub repository settings, set **Pages → Source → GitHub Actions** and custom domain to `airesearchcoach.org`.
 
-The published URL will be `https://arc-csc.github.io/ai-research-coach/`.
+The published URL is `https://airesearchcoach.org`.
 
 ## URL parameters
 

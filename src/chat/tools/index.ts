@@ -1,5 +1,6 @@
 import { Tool, ToolContext } from "../../react-ai-chat";
 import type { ToolExecutionContext } from "../types";
+import { endSessionTool } from "./endSession";
 import { fetchUrlTool } from "./fetchUrl";
 import { runScriptTool } from "./runScript";
 import { showIframeTool } from "./showIframe";
@@ -20,6 +21,14 @@ export const showIframe: Tool = {
   getDetailedDescription: showIframeTool.getDetailedDescription,
 };
 
+export const endSession: Tool = {
+  toolFunction: endSessionTool.toolFunction,
+  execute: async (params: unknown, context: ToolContext) => {
+    return endSessionTool.execute(params, context as unknown as ToolExecutionContext);
+  },
+  getDetailedDescription: endSessionTool.getDetailedDescription,
+};
+
 /**
  * All available tools for the chat
  */
@@ -27,4 +36,5 @@ export const tools: Tool[] = [
   fetchUrl,
   runScriptTool,
   showIframe,
+  endSession,
 ];

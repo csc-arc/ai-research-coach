@@ -268,6 +268,19 @@ export interface ChatPanelProps {
   onMessageSent?: (message: string) => void;
 
   /**
+   * Fired synchronously when the user submits a message, before /api/completion
+   * is called. Used for fast-eval triggering (must precede the completion call).
+   */
+  onUserMessageSubmit?: (content: string) => Promise<void> | void;
+
+  /**
+   * Fired when assistant turns have settled (post-stream). Used for
+   * assistant-message logging. Receives only the newly-settled assistant
+   * messages, not the user message.
+   */
+  onAssistantMessagesSettled?: (msgs: ChatMessage[]) => void;
+
+  /**
    * Callback when an error occurs
    */
   onError?: (error: Error) => void;
@@ -301,6 +314,15 @@ export interface ChatPanelProps {
    * @default false
    */
   autoStartConversation?: boolean;
+
+  /**
+   * If provided on first render with at least one message, the chat is
+   * rehydrated with these messages via `loadChat`. Subsequent changes to
+   * this prop are ignored — this is intended for one-shot session-resume
+   * rehydration. Rehydrated messages are NOT re-emitted via
+   * `onAssistantMessagesSettled`.
+   */
+  initialMessages?: ChatMessage[];
 }
 
 /**

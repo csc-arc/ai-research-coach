@@ -2,6 +2,7 @@ import { CompletionFunction } from "../react-ai-chat";
 import { parseCompletionStream } from "./parseCompletionStream";
 import { getOrPromptPasscode } from "./passcodeStorage";
 import { getServerUrl } from "../serverConfig";
+import { getRequiredStudentProject } from "../studentProject";
 
 // Retry configuration for rate limit errors
 const MAX_RETRIES = 3;
@@ -26,12 +27,22 @@ export const createCompletionFunction = (): CompletionFunction => {
       throw new Error("Passcode is required to use the AI assistant.");
     }
 
+    let studentId: string | undefined;
+    let projectId: string | undefined;
+    try {
+      ({ studentId, projectId } = getRequiredStudentProject());
+    } catch {
+      // Not all callers have student/project context (e.g. tests); send without
+    }
+
     const body = {
       model: request.model,
       systemMessage: request.systemMessage,
       messages: request.messages,
       tools: request.tools.length > 0 ? request.tools : undefined,
       passcode,
+      student_id: studentId,
+      project_id: projectId,
     };
 
     let response: Response | null = null;
