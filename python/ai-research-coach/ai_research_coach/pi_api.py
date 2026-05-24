@@ -267,38 +267,37 @@ def _prompt_filename_for(key: str) -> str:
     return _VALID_PROMPT_KEYS[key]
 
 
-@router.get("/prompt-history/{prompt_name}")
-async def get_prompt_history(
-    prompt_name: str,
-    passcode: Optional[str] = Query(None),
-    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
-):
-    """List commits on `main` that touched the named prompt file, newest
-    first. Cached for ~5 minutes."""
-    _validate_pi_passcode(x_pi_passcode, passcode)
-    filename = _prompt_filename_for(prompt_name)
+def _github_headers() -> dict[str, str]:
+    """GitHub API headers, with optional `GITHUB_TOKEN` for higher rate limits."""
+    headers = {"Accept": "application/vnd.github+json"}
+    import os
+    gh_token = os.environ.get("GITHUB_TOKEN")
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+    return headers
 
+
+async def _fetch_prompt_history(filename: str) -> list[dict]:
+    """Internal: fetch the per-file commit history (newest first), cached.
+
+    Used by both `/prompt-history/{name}` and `/prompts-divergence`.
+    """
     now = time.monotonic()
     cached = _prompt_history_cache.get(filename)
     if cached is not None:
         ts, payload = cached
         if now - ts < _PROMPT_HISTORY_CACHE_TTL_SECONDS:
-            return {"history": payload, "cached": True}
+            return payload
 
     api_url = (
         f"https://api.github.com/repos/{recorder.REPO_OWNER}/{recorder.REPO_NAME}"
         f"/commits"
     )
     params = {"path": f"public/{filename}", "sha": "main", "per_page": "100"}
-    headers = {"Accept": "application/vnd.github+json"}
-    import os
-    gh_token = os.environ.get("GITHUB_TOKEN")
-    if gh_token:
-        headers["Authorization"] = f"Bearer {gh_token}"
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.get(api_url, params=params, headers=headers)
+            r = await client.get(api_url, params=params, headers=_github_headers())
             r.raise_for_status()
             commits_payload = r.json()
     except httpx.HTTPError as e:
@@ -310,7 +309,8 @@ async def get_prompt_history(
         commit_obj = c.get("commit") or {}
         author = commit_obj.get("author") or {}
         committed_at = author.get("date") or ""
-        message = (commit_obj.get("message") or "").splitlines()[0] if commit_obj.get("message") else ""
+        message_lines = (commit_obj.get("message") or "").splitlines()
+        message = message_lines[0] if message_lines else ""
         if sha:
             history.append({
                 "sha": sha,
@@ -319,7 +319,176 @@ async def get_prompt_history(
             })
 
     _prompt_history_cache[filename] = (now, history)
+    return history
+
+
+@router.get("/prompt-history/{prompt_name}")
+async def get_prompt_history(
+    prompt_name: str,
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """List commits on `main` that touched the named prompt file, newest
+    first. Cached for ~5 minutes."""
+    _validate_pi_passcode(x_pi_passcode, passcode)
+    filename = _prompt_filename_for(prompt_name)
+    history = await _fetch_prompt_history(filename)
     return {"history": history, "cached": False}
+
+
+# Per-since-sha cache for divergence responses. Keyed by since_sha so each
+# session's check is cached independently. TTL is short — main is moving.
+_DIVERGENCE_CACHE_TTL_SECONDS = 60
+_divergence_cache: dict[str, tuple[float, dict]] = {}
+
+
+async def _fetch_commit_committed_at(sha: str) -> Optional[str]:
+    """Resolve a commit SHA → its `committer.date` (ISO 8601 string).
+
+    Returns None if the API call fails or the SHA is unknown — caller
+    decides how to degrade.
+    """
+    if not sha or sha.startswith("local:") or sha == "unknown":
+        return None
+    api_url = (
+        f"https://api.github.com/repos/{recorder.REPO_OWNER}/{recorder.REPO_NAME}"
+        f"/commits/{sha}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(api_url, headers=_github_headers())
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            obj = r.json()
+            commit = obj.get("commit") or {}
+            committer = commit.get("committer") or {}
+            return committer.get("date") or (commit.get("author") or {}).get("date")
+    except httpx.HTTPError:
+        return None
+
+
+@router.get("/prompts-divergence")
+async def get_prompts_divergence(
+    since: str = Query(..., min_length=1, max_length=64),
+    passcode: Optional[str] = Query(None),
+    x_pi_passcode: Optional[str] = Header(None, alias="X-PI-Passcode"),
+):
+    """Compare a session's pinned prompts SHA against current head of main.
+
+    Returns per-prompt-file divergence info: which of the three prompt files
+    (coach `instructions-v1.md`, fast-eval, deep-eval) have been modified
+    since the session ran, plus the commit subjects so the PI can decide
+    whether it's worth re-running with the current prompts.
+
+    Sessions whose `prompts_sha` is missing or starts with `local:` cannot
+    be compared (no GitHub anchor); we return `comparable: false` and let
+    the UI suppress the chip.
+    """
+    _validate_pi_passcode(x_pi_passcode, passcode)
+
+    # Sanity-check the SHA shape — reject obvious garbage but allow short
+    # SHAs since those are still resolvable on GitHub.
+    if not re.match(r"^[0-9a-fA-F]{7,40}$", since):
+        # Either a `local:` hash or an `unknown` placeholder — not comparable.
+        return {
+            "since_sha": since,
+            "head_sha": None,
+            "comparable": False,
+            "reason": "Pinned SHA is a local content hash, not a GitHub commit",
+            "prompts": {},
+            "any_modified": False,
+        }
+
+    # Cache by since_sha so re-clicking a session view doesn't re-spam GitHub.
+    now = time.monotonic()
+    cached = _divergence_cache.get(since)
+    if cached is not None:
+        ts, payload = cached
+        if now - ts < _DIVERGENCE_CACHE_TTL_SECONDS:
+            return {**payload, "cached": True}
+
+    head_sha = await recorder.resolve_prompts_sha()
+    if head_sha and head_sha.startswith("local:"):
+        # The recorder fell back to a local hash — we can't compare against
+        # GitHub. Surface this honestly rather than pretending to compare.
+        payload = {
+            "since_sha": since,
+            "head_sha": head_sha,
+            "comparable": False,
+            "reason": "Server is in local-fallback mode (no GitHub access)",
+            "prompts": {},
+            "any_modified": False,
+        }
+        _divergence_cache[since] = (now, payload)
+        return payload
+
+    if head_sha == since:
+        payload = {
+            "since_sha": since,
+            "head_sha": head_sha,
+            "comparable": True,
+            "prompts": {
+                "instructions-v1.md": {"modified": False, "commits": []},
+                "fast-eval-prompt.md": {"modified": False, "commits": []},
+                "deep-eval-prompt.md": {"modified": False, "commits": []},
+            },
+            "any_modified": False,
+        }
+        _divergence_cache[since] = (now, payload)
+        return payload
+
+    # Resolve the date of `since` so we can filter per-file histories.
+    since_date = await _fetch_commit_committed_at(since)
+    if not since_date:
+        # Fall back to "every commit on file is potentially newer" — the UI
+        # can still show the chip but won't have a precise list.
+        since_date = ""
+
+    # Fetch each of the three prompt files' commit histories in parallel and
+    # filter to commits whose committer-date is strictly newer than the
+    # session's pinned commit's date. (We ignore the recorder prompt for
+    # divergence — the PI dashboard's drafting flow excludes it.)
+    targets = {
+        "instructions-v1.md": "instructions-v1.md",
+        "fast-eval-prompt.md": recorder.PROMPT_FILES["fast_eval"],
+        "deep-eval-prompt.md": recorder.PROMPT_FILES["deep_eval"],
+    }
+
+    async def per_file(label: str, filename: str):
+        try:
+            history = await _fetch_prompt_history(filename)
+        except HTTPException:
+            return label, {"modified": False, "commits": [], "error": "history fetch failed"}
+        if not since_date:
+            # Without a since-date we can't reliably filter. Conservative:
+            # mark as unknown rather than guessing.
+            return label, {
+                "modified": False,
+                "commits": [],
+                "error": "could not resolve session SHA on GitHub",
+            }
+        commits_since = [
+            c for c in history
+            if c.get("committed_at") and c["committed_at"] > since_date
+        ]
+        return label, {
+            "modified": len(commits_since) > 0,
+            "commits": commits_since[:20],  # cap for response size
+        }
+
+    results = await asyncio.gather(*(per_file(k, v) for k, v in targets.items()))
+    prompts = dict(results)
+
+    payload = {
+        "since_sha": since,
+        "head_sha": head_sha,
+        "comparable": True,
+        "prompts": prompts,
+        "any_modified": any(p.get("modified") for p in prompts.values()),
+    }
+    _divergence_cache[since] = (now, payload)
+    return payload
 
 
 @router.get("/prompt/{prompt_name}")

@@ -3,8 +3,16 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   IconButton,
+  Link,
+  List,
+  ListItem,
+  ListItemText,
   Paper,
   Stack,
   Tab,
@@ -19,7 +27,8 @@ import {
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RateReviewIcon from "@mui/icons-material/RateReview";
 import ReplayIcon from "@mui/icons-material/Replay";
-import { useCallback, useMemo, useState } from "react";
+import UpdateIcon from "@mui/icons-material/Update";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CoachIssueReviewEntry,
   FastEvalArgs,
@@ -27,11 +36,13 @@ import {
   FastEvalTurnEntry,
   FeedbackBundle,
   IssueFeedbackPost,
+  PromptsDivergenceResponse,
   SessionBundle,
   SessionFeedbackPost,
   TranscriptMessage,
   TurnAnnotationEntry,
   TurnFeedbackPost,
+  fetchPromptsDivergence,
   postIssueFeedback,
   postSessionFeedback,
   postTurnFeedback,
@@ -70,6 +81,28 @@ export default function SessionViewer({
   onBundleRefresh,
 }: SessionViewerProps) {
   const [tab, setTab] = useState<Tabish>("summary");
+
+  // Fetch divergence info for the prompts SHA this session was pinned to.
+  // Sessions without a pinned SHA (older than Phase A1, or local-fallback
+  // hashes) are silently skipped — the chip just won't appear.
+  const pinnedSha = bundle.metadata?.prompts_sha ?? null;
+  const [divergence, setDivergence] = useState<PromptsDivergenceResponse | null>(null);
+  useEffect(() => {
+    setDivergence(null);
+    if (!pinnedSha) return;
+    if (pinnedSha === "unknown" || pinnedSha.startsWith("local:")) return;
+    let cancelled = false;
+    fetchPromptsDivergence(pinnedSha)
+      .then((r) => {
+        if (!cancelled) setDivergence(r);
+      })
+      .catch(() => {
+        // Non-fatal — surface nothing rather than a broken UI.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pinnedSha]);
 
   const handleSubmit = useCallback(
     async (kind: "session" | "turn" | "issue", body: unknown) => {
@@ -112,7 +145,7 @@ export default function SessionViewer({
         </Tooltip>
       </Box>
 
-      <SessionStatusChips bundle={bundle} />
+      <SessionStatusChips bundle={bundle} divergence={divergence} />
 
       <SessionLevelFeedback
         bundle={bundle}
@@ -151,6 +184,7 @@ export default function SessionViewer({
             student={student}
             sessionTs={sessionTs}
             originalSha={bundle.metadata?.prompts_sha ?? null}
+            divergence={divergence}
             reviewer={reviewer}
             onTurnSubmit={(body) => handleSubmit("turn", body)}
             onIssueSubmit={(body) => handleSubmit("issue", body)}
@@ -164,8 +198,15 @@ export default function SessionViewer({
   );
 }
 
-function SessionStatusChips({ bundle }: { bundle: SessionBundle }) {
+function SessionStatusChips({
+  bundle,
+  divergence,
+}: {
+  bundle: SessionBundle;
+  divergence: PromptsDivergenceResponse | null;
+}) {
   const md = bundle.metadata;
+  const [divergenceOpen, setDivergenceOpen] = useState(false);
   if (!md) return null;
   const chips: { label: string; color?: "default" | "warning" | "error" | "success" }[] = [];
   if (md.status === "recorder_failed") {
@@ -184,17 +225,121 @@ function SessionStatusChips({ bundle }: { bundle: SessionBundle }) {
     chips.push({ label: `${m} min` });
   }
   if (md.abrupt) chips.push({ label: "abrupt", color: "warning" });
+
+  const modifiedFiles = useMemo(() => {
+    if (!divergence?.comparable || !divergence.any_modified) return [];
+    return Object.entries(divergence.prompts).filter(([, v]) => v.modified);
+  }, [divergence]);
+  const totalCommits = modifiedFiles.reduce(
+    (sum, [, v]) => sum + (v.commits?.length ?? 0),
+    0,
+  );
+
   return (
     <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
       {chips.map((c, i) => (
         <Chip key={i} label={c.label} color={c.color ?? "default"} size="small" />
       ))}
+      {modifiedFiles.length > 0 && (
+        <Tooltip title="Prompt files have been updated on main since this session ran. Click to see what changed.">
+          <Chip
+            icon={<UpdateIcon />}
+            label={`prompts updated since session (${modifiedFiles.length} file${
+              modifiedFiles.length === 1 ? "" : "s"
+            }, ${totalCommits} commit${totalCommits === 1 ? "" : "s"})`}
+            color="warning"
+            size="small"
+            onClick={() => setDivergenceOpen(true)}
+            sx={{ cursor: "pointer" }}
+          />
+        </Tooltip>
+      )}
       {md.status === "recorder_failed" && md.failure_reason && (
         <Alert severity="warning" sx={{ width: "100%", mt: 1 }}>
           {md.failure_reason}
         </Alert>
       )}
+      {divergenceOpen && divergence && (
+        <DivergenceDialog
+          divergence={divergence}
+          onClose={() => setDivergenceOpen(false)}
+        />
+      )}
     </Stack>
+  );
+}
+
+function DivergenceDialog({
+  divergence,
+  onClose,
+}: {
+  divergence: PromptsDivergenceResponse;
+  onClose: () => void;
+}) {
+  const repoUrl = "https://github.com/csc-arc/ai-research-coach";
+  const modifiedFiles = Object.entries(divergence.prompts).filter(
+    ([, v]) => v.modified,
+  );
+  return (
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle>Prompt changes since this session</DialogTitle>
+      <DialogContent dividers>
+        <Typography variant="body2" sx={{ mb: 2 }}>
+          Session pinned to{" "}
+          <code>{divergence.since_sha.slice(0, 7)}</code>; main is now{" "}
+          <code>{divergence.head_sha?.slice(0, 7) ?? "?"}</code>. The PI
+          dashboard's drafting flow only edits the coach and eval prompts, so
+          recorder-prompt changes aren't tracked here.
+        </Typography>
+        {modifiedFiles.length === 0 ? (
+          <Alert severity="info">
+            No coach or eval prompt files have changed since this session ran.
+          </Alert>
+        ) : (
+          <Stack spacing={2}>
+            {modifiedFiles.map(([filename, info]) => (
+              <Box key={filename}>
+                <Typography variant="subtitle2" sx={{ fontFamily: "monospace" }}>
+                  public/{filename}
+                </Typography>
+                <List dense>
+                  {(info.commits ?? []).map((c) => (
+                    <ListItem key={c.sha} disableGutters sx={{ py: 0 }}>
+                      <ListItemText
+                        primary={
+                          <>
+                            <Link
+                              href={`${repoUrl}/commit/${c.sha}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              sx={{ fontFamily: "monospace", mr: 1 }}
+                            >
+                              {c.sha.slice(0, 7)}
+                            </Link>
+                            {c.commit_subject}
+                          </>
+                        }
+                        secondary={c.committed_at?.slice(0, 10)}
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              </Box>
+            ))}
+          </Stack>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button
+          href={`${repoUrl}/compare/${divergence.since_sha}...${divergence.head_sha}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          View full diff on GitHub
+        </Button>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
@@ -357,6 +502,7 @@ interface TranscriptTabProps {
   student: string;
   sessionTs: string;
   originalSha: string | null;
+  divergence: PromptsDivergenceResponse | null;
   reviewer: string | null;
   onTurnSubmit: (body: TurnFeedbackPost) => void;
   onIssueSubmit: (body: IssueFeedbackPost) => void;
@@ -373,6 +519,7 @@ function TranscriptTab({
   student,
   sessionTs,
   originalSha,
+  divergence,
   reviewer,
   onTurnSubmit,
   onIssueSubmit,
@@ -488,6 +635,7 @@ function TranscriptTab({
           sessionTs={sessionTs}
           turn={replayState.turn}
           originalSha={originalSha}
+          divergence={divergence}
           recordedFastEvalForTurn={
             (() => {
               const args = fastEvalByUserTurn.get(replayState.turn);

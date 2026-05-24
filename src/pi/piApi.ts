@@ -265,6 +265,40 @@ export function fetchPromptAtSha(
 }
 
 // ---------------------------------------------------------------------------
+// Prompt divergence — has the prompt file moved on main since the session ran?
+// ---------------------------------------------------------------------------
+
+export interface PromptDivergenceCommit {
+  sha: string;
+  committed_at: string;
+  commit_subject: string;
+}
+
+export interface PromptDivergenceFileEntry {
+  modified: boolean;
+  commits?: PromptDivergenceCommit[];
+  error?: string;
+}
+
+export interface PromptsDivergenceResponse {
+  since_sha: string;
+  head_sha: string | null;
+  comparable: boolean;
+  reason?: string;
+  prompts: Record<string, PromptDivergenceFileEntry>;
+  any_modified: boolean;
+  cached?: boolean;
+}
+
+export function fetchPromptsDivergence(
+  sinceSha: string,
+): Promise<PromptsDivergenceResponse> {
+  return piFetch<PromptsDivergenceResponse>(
+    `/api/pi/prompts-divergence?since=${encodeURIComponent(sinceSha)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Replay
 // ---------------------------------------------------------------------------
 

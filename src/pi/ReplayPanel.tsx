@@ -18,11 +18,12 @@ import {
 } from "@mui/material";
 import DownloadIcon from "@mui/icons-material/Download";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import UpdateIcon from "@mui/icons-material/Update";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PromptHistoryEntry,
-  PromptMode,
   PromptSelector,
+  PromptsDivergenceResponse,
   ReplayResponse,
   fetchPromptAtSha,
   fetchPromptHistory,
@@ -115,35 +116,54 @@ function AgentPromptControls({
     URL.revokeObjectURL(url);
   };
 
+  // Translate the underlying PromptSelector into a 4-way UI mode so that
+  // "Currently deployed (live main)" is its own first-class dropdown entry,
+  // distinct from "Pick historical SHA".
+  type UiMode = "text" | "live" | "original" | "sha";
+  const uiMode: UiMode =
+    selector.mode === "text"
+      ? "text"
+      : selector.mode === "original"
+        ? "original"
+        : selector.value === "live"
+          ? "live"
+          : "sha";
+
+  const setUiMode = (next: UiMode) => {
+    if (next === "text") {
+      // Reset value so the seeding effect re-fetches.
+      onChange({ mode: "text", value: undefined });
+    } else if (next === "live") {
+      onChange({ mode: "sha", value: "live" });
+    } else if (next === "original") {
+      onChange({ mode: "original", value: undefined });
+    } else {
+      onChange({ mode: "sha", value: undefined });
+    }
+  };
+
   return (
     <Box>
       <Typography variant="subtitle2" sx={{ textTransform: "capitalize", mb: 0.5 }}>
         {agent.replace("_", "-")} prompt
       </Typography>
       <Stack direction="row" spacing={1} alignItems="center">
-        <FormControl size="small" sx={{ minWidth: 160 }}>
+        <FormControl size="small" sx={{ minWidth: 220 }}>
           <InputLabel>Mode</InputLabel>
           <Select
             label="Mode"
-            value={selector.mode}
-            onChange={(e) => {
-              const next = e.target.value as PromptMode;
-              if (next === "text") {
-                // Reset value so the seeding effect re-fetches.
-                onChange({ mode: "text", value: undefined });
-              } else {
-                onChange({ mode: next, value: undefined });
-              }
-            }}
+            value={uiMode}
+            onChange={(e) => setUiMode(e.target.value as UiMode)}
           >
             <MenuItem value="text">Edit inline</MenuItem>
+            <MenuItem value="live">Currently deployed (live main)</MenuItem>
             <MenuItem value="original" disabled={!originalSha}>
               Original (pinned)
             </MenuItem>
             <MenuItem value="sha">Pick historical SHA</MenuItem>
           </Select>
         </FormControl>
-        {selector.mode === "sha" && (
+        {uiMode === "sha" && (
           <FormControl size="small" sx={{ minWidth: 200, flex: 1 }}>
             <InputLabel>SHA</InputLabel>
             <Select
@@ -156,13 +176,11 @@ function AgentPromptControls({
               renderValue={(value) => {
                 if (!value) return <em>Select…</em>;
                 const v = String(value);
-                if (v === "live") return "Live (head of main)";
                 const entry = history?.find((h) => h.sha === v);
                 if (!entry) return v.slice(0, 7);
                 return `${v.slice(0, 7)} — ${entry.commit_subject}`.slice(0, 80);
               }}
             >
-              <MenuItem value="live">Live (head of main)</MenuItem>
               {loadingHistory && (
                 <MenuItem disabled>
                   <CircularProgress size={16} />
@@ -231,6 +249,9 @@ interface ReplayPanelProps {
   sessionTs: string;
   turn: number;
   originalSha: string | null;
+  /** Per-prompt divergence info — used to surface "main has moved since
+   * this session" with a one-click switch to "Currently deployed". */
+  divergence: PromptsDivergenceResponse | null;
   /** Used as a placeholder in the side-by-side comparison. */
   recordedFastEvalForTurn?: string | null;
   /** End-of-session deep-eval markdown (the only "original" we have). */
@@ -246,6 +267,7 @@ export default function ReplayPanel({
   sessionTs,
   turn,
   originalSha,
+  divergence,
   recordedFastEvalForTurn,
   recordedDeepEval,
 }: ReplayPanelProps) {
@@ -332,6 +354,34 @@ export default function ReplayPanel({
     [],
   );
 
+  const divergenceSummary = useMemo(() => {
+    if (!divergence?.comparable || !divergence.any_modified) return null;
+    const modified = Object.entries(divergence.prompts).filter(
+      ([, v]) => v.modified,
+    );
+    if (modified.length === 0) return null;
+    const totalCommits = modified.reduce(
+      (sum, [, v]) => sum + (v.commits?.length ?? 0),
+      0,
+    );
+    const fileLabels = modified
+      .map(([f]) => f.replace(/\.md$/, "").replace("instructions-v1", "coach"))
+      .join(", ");
+    return { fileLabels, totalCommits, fileCount: modified.length };
+  }, [divergence]);
+
+  const switchAllToLive = () => {
+    setCoachPrompt({ mode: "sha", value: "live" });
+    setFastEvalPrompt({ mode: "sha", value: "live" });
+    setDeepEvalPrompt({ mode: "sha", value: "live" });
+  };
+
+  const switchAllToText = () => {
+    setCoachPrompt({ mode: "text", value: undefined });
+    setFastEvalPrompt({ mode: "text", value: undefined });
+    setDeepEvalPrompt({ mode: "text", value: undefined });
+  };
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
       <DialogTitle>
@@ -344,6 +394,41 @@ export default function ReplayPanel({
         <Alert severity="info" sx={{ mb: 2 }}>
           {helperBanner}
         </Alert>
+
+        {divergenceSummary && (
+          <Alert
+            icon={<UpdateIcon fontSize="inherit" />}
+            severity="warning"
+            sx={{ mb: 2 }}
+            action={
+              <Stack direction="row" spacing={1}>
+                <Button
+                  size="small"
+                  color="inherit"
+                  variant="outlined"
+                  onClick={switchAllToLive}
+                >
+                  Use current main
+                </Button>
+                <Button
+                  size="small"
+                  color="inherit"
+                  onClick={switchAllToText}
+                >
+                  Keep editing
+                </Button>
+              </Stack>
+            }
+          >
+            Prompts have been updated since this session ran (
+            {divergenceSummary.fileCount} file
+            {divergenceSummary.fileCount === 1 ? "" : "s"},{" "}
+            {divergenceSummary.totalCommits} commit
+            {divergenceSummary.totalCommits === 1 ? "" : "s"}:{" "}
+            {divergenceSummary.fileLabels}). Your feedback may already be
+            addressed — try replaying with the current prompts before iterating.
+          </Alert>
+        )}
 
         {result && (
           <Alert
