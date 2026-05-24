@@ -70,14 +70,20 @@ Change this prompt when PI feedback is about the *quality or content of the sess
 | "The session summaries are missing Y" or "the cumulative report isn't tracking Z" | `recorder-prompt.md` |
 | "The evaluation file doesn't capture W" | `deep-eval-prompt.md` |
 
-### Step 2 — Check the `coach_issues` enum first
+### Step 2 — Check the existing enums first
 
-Before adding a new behavior rule, check whether the issue is already in the `coach_issues` enum used by the evaluators. If it is, the evaluators may already be flagging it — the problem may be that the coach isn't acting on the signal strongly enough, not that detection is missing. In that case, strengthen the relevant behavior rule rather than adding a new evaluator category.
+The evaluators flag two distinct things:
 
-If the issue is genuinely new and not covered by the enum:
-1. Add the new category string to `fast-eval-prompt.md` and `deep-eval-prompt.md` tables (both must match).
-2. Add the category to `COACH_ISSUE_RECURRENCE_CATEGORIES` in `python/ai-research-coach/ai_research_coach/recorder.py`.
-3. Add a corresponding behavior rule to `instructions-v1.md`.
+- **`coach_issues`** — problems with the coach's behavior (the coach said/did something it shouldn't have)
+- **`student_red_flags`** — problems with how the student is using the coach (deviations from treating it like a real human professor: solution extraction, prompt injection, off-topic misuse, disrespect, inappropriate disclosure)
+
+Before adding a new category to either enum, check whether the issue is already covered. If it is, the evaluators may already be flagging it — the problem may be that the coach isn't acting on the signal strongly enough, not that detection is missing. In that case, strengthen the relevant behavior rule rather than adding a new evaluator category.
+
+If the issue is genuinely new and not covered:
+1. Add the new category string to **both** `fast-eval-prompt.md` and `deep-eval-prompt.md` tables (the strings must match exactly).
+2. Add the category to `COACH_ISSUE_CATEGORIES` or `STUDENT_RED_FLAG_CATEGORIES` in `python/ai-research-coach/ai_research_coach/recorder.py`.
+3. If it's a coach issue and you want it to count toward end-of-session recurrence, also add it to `COACH_ISSUE_RECURRENCE_CATEGORIES`.
+4. Add a corresponding behavior rule to `instructions-v1.md`.
 
 ### Step 3 — Edit, commit to `main`, wait ~5 minutes
 
@@ -96,7 +102,7 @@ Add or update an entry in `notes/coach-behavior-notes.md` in the workspace (see 
 
 ## What NOT to change without careful thought
 
-- **The `coach_issues` enum category strings**: they are shared across three prompts and one Python file. A rename must be coordinated across all four.
+- **The `coach_issues` and `student_red_flags` enum category strings**: they are shared across the two evaluator prompts and `recorder.py`. A rename must be coordinated across all three files.
 - **The `## Coach style notes` and `## Notes for PI` headings in the recorder prompt**: these are parsed programmatically.
 - **The `parameters:` line in `instructions-v1.md`**: these are substituted by the frontend before the prompt is sent. Removing a parameter that the template still references causes a session-start failure.
 - **The `recording-mode: split` line in `instructions-v1.md`**: removing this reverts to the legacy single-agent mode.

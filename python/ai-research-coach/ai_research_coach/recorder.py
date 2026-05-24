@@ -66,6 +66,14 @@ COACH_ISSUE_CATEGORIES = {
     "no_clarification_for_ambiguity",
 }
 
+STUDENT_RED_FLAG_CATEGORIES = {
+    "solution_extraction",
+    "prompt_injection",
+    "off_topic_misuse",
+    "disrespect",
+    "inappropriate_disclosure",
+}
+
 ENGAGEMENT_VALUES = {"high", "medium", "low", "frustrated"}
 
 COACH_SESSIONS_REPO_URL = "https://github.com/csc-arc/coach-sessions.git"
@@ -351,6 +359,20 @@ _COACH_ISSUE_OBJECT_SCHEMA = {
     "additionalProperties": False,
 }
 
+_STUDENT_RED_FLAG_OBJECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "category": {
+            "type": "string",
+            "enum": sorted(STUDENT_RED_FLAG_CATEGORIES),
+        },
+        "observation": {"type": "string"},
+        "suggested_response": {"type": "string"},
+    },
+    "required": ["category", "observation", "suggested_response"],
+    "additionalProperties": False,
+}
+
 FAST_EVAL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -366,6 +388,10 @@ FAST_EVAL_TOOL_SCHEMA = {
                     "type": "array",
                     "items": _COACH_ISSUE_OBJECT_SCHEMA,
                 },
+                "student_red_flags": {
+                    "type": "array",
+                    "items": _STUDENT_RED_FLAG_OBJECT_SCHEMA,
+                },
                 "open_threads": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -378,6 +404,7 @@ FAST_EVAL_TOOL_SCHEMA = {
             },
             "required": [
                 "coach_issues",
+                "student_red_flags",
                 "open_threads",
                 "mode_effectiveness",
                 "suggested_next_move",
@@ -409,6 +436,10 @@ DEEP_EVAL_TOOL_SCHEMA = {
                 "coach_issues": {
                     "type": "array",
                     "items": _COACH_ISSUE_OBJECT_SCHEMA,
+                },
+                "student_red_flags": {
+                    "type": "array",
+                    "items": _STUDENT_RED_FLAG_OBJECT_SCHEMA,
                 },
                 "personalization_signals": {
                     "type": "array",
@@ -443,6 +474,7 @@ DEEP_EVAL_TOOL_SCHEMA = {
                 "engagement",
                 "mode_effectiveness",
                 "coach_issues",
+                "student_red_flags",
                 "personalization_signals",
                 "suggested_action",
                 "summary",
@@ -570,6 +602,20 @@ def _render_fast_eval_markdown(args: dict) -> str:
             lines.append(f"- **{cat}** — {obs}")
             if corr:
                 lines.append(f"  - _Correction:_ {corr}")
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    red_flags = args.get("student_red_flags") or []
+    lines.append("### Student red flags")
+    if red_flags:
+        for flag in red_flags:
+            cat = flag.get("category", "?")
+            obs = (flag.get("observation") or "").strip()
+            resp = (flag.get("suggested_response") or "").strip()
+            lines.append(f"- **{cat}** — {obs}")
+            if resp:
+                lines.append(f"  - _Response:_ {resp}")
     else:
         lines.append("(none)")
     lines.append("")
@@ -815,6 +861,20 @@ def _render_deep_eval_markdown(args: dict) -> str:
             lines.append(f"- **{cat}** — {obs}")
             if corr:
                 lines.append(f"  - _Correction:_ {corr}")
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    lines.append("### Student red flags")
+    rf = args.get("student_red_flags") or []
+    if rf:
+        for flag in rf:
+            cat = flag.get("category", "?")
+            obs = (flag.get("observation") or "").strip()
+            resp = (flag.get("suggested_response") or "").strip()
+            lines.append(f"- **{cat}** — {obs}")
+            if resp:
+                lines.append(f"  - _Response:_ {resp}")
     else:
         lines.append("(none)")
     lines.append("")
