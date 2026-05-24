@@ -23,9 +23,6 @@ import { isValidId, useStudentProject } from '../../studentProject';
 import { useProjects, type Project } from '../../useProjects';
 
 const DEFAULT_INSTRUCTIONS_URL =
-  'https://github.com/csc-arc/ai-research-coach/blob/main/public/instructions.md';
-
-const V1_INSTRUCTIONS_URL =
   'https://github.com/csc-arc/ai-research-coach/blob/main/public/instructions-v1.md';
 
 export interface WelcomeIdentity {
@@ -296,17 +293,6 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
 
         <Collapse in={showExisting}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
-            <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
-              Try v1 (beta — split coach + observer):
-            </Typography>
-            <Button
-              variant="outlined"
-              onClick={() => persistAndContinue(V1_INSTRUCTIONS_URL)}
-              disabled={!identityValid}
-            >
-              Start v1 Session
-            </Button>
-
             <Divider />
 
             <Typography variant="subtitle2" color="text.secondary" sx={{ textAlign: 'left' }}>
