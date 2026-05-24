@@ -56,6 +56,7 @@ function AgentPromptControls({
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState<string>("");
+  const [seeding, setSeeding] = useState(false);
 
   const promptName = PROMPT_FILE_BY_AGENT[agent];
 
@@ -70,23 +71,35 @@ function AgentPromptControls({
       .finally(() => setLoadingHistory(false));
   }, [promptName]);
 
-  // When switching to text mode for the first time, pre-populate the
-  // textarea with the original-SHA prompt content (or head-of-main if
-  // there's no recorded SHA).
-  const switchToText = async () => {
+  // Seed the inline editor whenever we land in text mode without content.
+  // Covers two cases: the dialog opens in text mode (the new default), and
+  // the user switches *back* to text mode after picking SHA/Original.
+  useEffect(() => {
+    if (selector.mode !== "text") return;
+    if (selector.value && selector.value.length > 0) return;
+    let cancelled = false;
+    setSeeding(true);
     setTextDraft("Loading prompt content…");
-    onChange({ mode: "text", value: "" });
-    try {
-      const sha = originalSha || "live";
-      const r = await fetchPromptAtSha(promptName, sha);
-      setTextDraft(r.content);
-      onChange({ mode: "text", value: r.content });
-    } catch (e) {
-      setTextDraft("");
-      onChange({ mode: "text", value: "" });
-      setHistoryError(e instanceof Error ? e.message : "Failed to seed text");
-    }
-  };
+    const sha = originalSha || "live";
+    fetchPromptAtSha(promptName, sha)
+      .then((r) => {
+        if (cancelled) return;
+        setTextDraft(r.content);
+        onChange({ mode: "text", value: r.content });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setTextDraft("");
+        setHistoryError(e instanceof Error ? e.message : "Failed to seed text");
+      })
+      .finally(() => {
+        if (!cancelled) setSeeding(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selector.mode, originalSha, promptName]);
 
   const downloadText = () => {
     const value = textDraft;
@@ -107,7 +120,7 @@ function AgentPromptControls({
         {agent.replace("_", "-")} prompt
       </Typography>
       <Stack direction="row" spacing={1} alignItems="center">
-        <FormControl size="small" sx={{ minWidth: 140 }}>
+        <FormControl size="small" sx={{ minWidth: 160 }}>
           <InputLabel>Mode</InputLabel>
           <Select
             label="Mode"
@@ -115,17 +128,18 @@ function AgentPromptControls({
             onChange={(e) => {
               const next = e.target.value as PromptMode;
               if (next === "text") {
-                switchToText();
+                // Reset value so the seeding effect re-fetches.
+                onChange({ mode: "text", value: undefined });
               } else {
                 onChange({ mode: next, value: undefined });
               }
             }}
           >
+            <MenuItem value="text">Edit inline</MenuItem>
             <MenuItem value="original" disabled={!originalSha}>
               Original (pinned)
             </MenuItem>
             <MenuItem value="sha">Pick historical SHA</MenuItem>
-            <MenuItem value="text">Edit inline</MenuItem>
           </Select>
         </FormControl>
         {selector.mode === "sha" && (
@@ -175,8 +189,10 @@ function AgentPromptControls({
             }}
             multiline
             fullWidth
-            minRows={6}
-            maxRows={16}
+            minRows={5}
+            maxRows={14}
+            disabled={seeding}
+            placeholder={seeding ? "Loading prompt content…" : ""}
             sx={{
               "& textarea": {
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
@@ -184,11 +200,17 @@ function AgentPromptControls({
               },
             }}
           />
-          <Box sx={{ display: "flex", justifyContent: "flex-end", mt: 0.5 }}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">
+              {seeding
+                ? "Loading…"
+                : `Seeded from ${originalSha ? `pinned SHA (${originalSha.slice(0, 7)})` : "head of main"} — edit freely.`}
+            </Typography>
             <Button
               size="small"
               startIcon={<DownloadIcon fontSize="small" />}
               onClick={downloadText}
+              disabled={seeding || !textDraft}
             >
               Download
             </Button>
@@ -226,17 +248,22 @@ export default function ReplayPanel({
   recordedFastEvalForTurn,
   recordedDeepEval,
 }: ReplayPanelProps) {
+  // All three default to "Edit inline" — the primary use of replay is to
+  // try ad-hoc prompt edits and see how the pipeline responds. The
+  // textareas seed themselves from the session's pinned SHA (or head of
+  // main if none was recorded). PIs who want to A/B against a historical
+  // version can switch the Mode dropdown.
   const [coachPrompt, setCoachPrompt] = useState<PromptSelector>({
-    mode: originalSha ? "original" : "sha",
-    value: originalSha ? undefined : "live",
+    mode: "text",
+    value: undefined,
   });
   const [fastEvalPrompt, setFastEvalPrompt] = useState<PromptSelector>({
-    mode: originalSha ? "original" : "sha",
-    value: originalSha ? undefined : "live",
+    mode: "text",
+    value: undefined,
   });
   const [deepEvalPrompt, setDeepEvalPrompt] = useState<PromptSelector>({
-    mode: originalSha ? "original" : "sha",
-    value: originalSha ? undefined : "live",
+    mode: "text",
+    value: undefined,
   });
   const [coachModelOverride, setCoachModelOverride] = useState("");
   const [fastEvalModelOverride, setFastEvalModelOverride] = useState("");
@@ -249,18 +276,9 @@ export default function ReplayPanel({
   // (otherwise stale state from a previous replay would leak in).
   useEffect(() => {
     if (!open) return;
-    setCoachPrompt({
-      mode: originalSha ? "original" : "sha",
-      value: originalSha ? undefined : "live",
-    });
-    setFastEvalPrompt({
-      mode: originalSha ? "original" : "sha",
-      value: originalSha ? undefined : "live",
-    });
-    setDeepEvalPrompt({
-      mode: originalSha ? "original" : "sha",
-      value: originalSha ? undefined : "live",
-    });
+    setCoachPrompt({ mode: "text", value: undefined });
+    setFastEvalPrompt({ mode: "text", value: undefined });
+    setDeepEvalPrompt({ mode: "text", value: undefined });
     setResult(null);
     setError(null);
   }, [open, originalSha, turn]);
@@ -293,7 +311,7 @@ export default function ReplayPanel({
 
   const helperBanner = useMemo(
     () =>
-      "Replay re-runs the full pipeline using the prompts you choose. 'Original' uses the prompts pinned for this session, but the deep-eval and fast-eval are still recomputed — they don't exactly reproduce what the coach saw at the moment of recording.",
+      "Edit any of the prompts below and click Run replay to see how this user turn would have been handled under your changes. Each textarea is pre-loaded with the prompt as it was for this session — make changes, run, compare to the original output. Switch the Mode dropdown if you'd rather pin to a specific historical commit.",
     [],
   );
 
