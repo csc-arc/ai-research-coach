@@ -17,7 +17,8 @@ import {
   Typography,
 } from "@mui/material";
 import DownloadIcon from "@mui/icons-material/Download";
-import { useEffect, useMemo, useState } from "react";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PromptHistoryEntry,
   PromptMode,
@@ -272,6 +273,22 @@ export default function ReplayPanel({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReplayResponse | null>(null);
 
+  // Result section sits below 3 large prompt textareas in the same dialog;
+  // auto-scroll to it so reviewers don't think the click did nothing.
+  const resultRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!result) return;
+    // Defer one tick so the result block is mounted before we scroll.
+    const t = setTimeout(() => {
+      resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+    return () => clearTimeout(t);
+  }, [result]);
+
+  const scrollToResult = () => {
+    resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   // Re-initialize prompt selectors when the dialog reopens for a new turn
   // (otherwise stale state from a previous replay would leak in).
   useEffect(() => {
@@ -328,6 +345,25 @@ export default function ReplayPanel({
           {helperBanner}
         </Alert>
 
+        {result && (
+          <Alert
+            severity="success"
+            sx={{ mb: 2 }}
+            action={
+              <Button
+                size="small"
+                color="inherit"
+                onClick={scrollToResult}
+                startIcon={<KeyboardArrowDownIcon />}
+              >
+                Jump to results
+              </Button>
+            }
+          >
+            Replay complete — results are below the prompt editors.
+          </Alert>
+        )}
+
         <Stack spacing={2}>
           <AgentPromptControls
             agent="coach"
@@ -381,7 +417,7 @@ export default function ReplayPanel({
         )}
 
         {result && (
-          <Box sx={{ mt: 3 }}>
+          <Box ref={resultRef} sx={{ mt: 3, scrollMarginTop: 16 }}>
             <Divider sx={{ mb: 2 }} />
             <Typography variant="subtitle1" gutterBottom>
               Results
