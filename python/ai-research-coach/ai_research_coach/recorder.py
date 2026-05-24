@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-EVAL_MODEL = os.environ.get("ARC_EVAL_MODEL", "anthropic/claude-sonnet-latest")
+EVAL_MODEL = os.environ.get("ARC_EVAL_MODEL", "openai/gpt-chat-latest")
 RECORDER_MODEL = os.environ.get("ARC_RECORDER_MODEL", "openai/gpt-chat-latest")
 
 FAST_EVAL_LLM_TIMEOUT_SECONDS = 8
