@@ -1423,6 +1423,7 @@ async def _sync_to_coach_sessions(
         "git", "commit", "-m", commit_msg, cwd=tracker, timeout=30
     )
     if rc != 0:
+        logger.warning(f"coach-sessions commit failed: {err}")
         return {"status": "queued_retry", "error": err}
 
     rc, sha_out, _ = await _run_subprocess(
@@ -1435,4 +1436,5 @@ async def _sync_to_coach_sessions(
         logger.warning(f"coach-sessions push failed: {err}")
         return {"status": "queued_retry", "error": err, "commit_sha": commit_sha}
 
+    logger.info(f"coach-sessions push OK student={student_id} project={project_id} sha={commit_sha}")
     return {"status": "recorded", "commit_sha": commit_sha}
