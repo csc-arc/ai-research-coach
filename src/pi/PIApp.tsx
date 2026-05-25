@@ -31,6 +31,7 @@ import {
 } from "./piApi";
 import PINavigator from "./PINavigator";
 import SessionViewer from "./SessionViewer";
+import DraftsAppBarWidget from "./DraftsAppBarWidget";
 import logoIcon from "/logo-white.svg";
 
 const theme = createTheme({
@@ -268,6 +269,10 @@ export default function PIApp() {
             </Typography>
             <Stack direction="row" spacing={1} alignItems="center">
               {reviewerChip}
+              <DraftsAppBarWidget
+                reviewer={reviewer}
+                onReviewerMissing={handleSwitchReviewer}
+              />
               <Tooltip title="Refresh index">
                 <IconButton color="inherit" size="small" onClick={refreshIndex}>
                   <RefreshIcon fontSize="small" />

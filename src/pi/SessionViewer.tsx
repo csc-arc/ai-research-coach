@@ -48,6 +48,7 @@ import {
   postTurnFeedback,
 } from "./piApi";
 import { chainsForEntries } from "./feedbackUtils";
+import { notifyFeedbackWritten } from "./feedbackEvents";
 import { MarkdownContent } from "../react-ai-chat";
 import PromptViewer from "./PromptViewer";
 import ReplayPanel from "./ReplayPanel";
@@ -118,6 +119,9 @@ export default function SessionViewer({
         } else {
           await postIssueFeedback(body as IssueFeedbackPost);
         }
+        // Tell the drafts widget (and any other in-app subscriber) that a
+        // feedback item was written so its counter refreshes immediately.
+        notifyFeedbackWritten();
         onBundleRefresh();
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Feedback failed";
@@ -636,6 +640,7 @@ function TranscriptTab({
           turn={replayState.turn}
           originalSha={originalSha}
           divergence={divergence}
+          reviewer={reviewer}
           recordedFastEvalForTurn={
             (() => {
               const args = fastEvalByUserTurn.get(replayState.turn);

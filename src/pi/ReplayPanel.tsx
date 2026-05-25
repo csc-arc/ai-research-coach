@@ -30,6 +30,7 @@ import {
   postReplay,
 } from "./piApi";
 import { MarkdownContent } from "../react-ai-chat";
+import { getActiveDraftSet, type DraftSet } from "./draftsStorage";
 
 type AgentKey = "coach" | "fast_eval" | "deep_eval";
 
@@ -46,6 +47,16 @@ interface AgentPromptControlsProps {
   selector: PromptSelector;
   onChange: (next: PromptSelector) => void;
   originalSha: string | null;
+  /**
+   * The reviewer's active draft set for this prompt, if any. When present,
+   * exposes a "Working draft" mode in the dropdown that pins the prompt to
+   * the in-progress draft text.
+   */
+  draftSet: DraftSet | null;
+  /** True iff the visible mode in this picker is "Working draft". */
+  isWorkingDraftMode: boolean;
+  /** Switch to Working draft mode (seeds the inline value). */
+  onSwitchToWorkingDraft: () => void;
 }
 
 function AgentPromptControls({
@@ -53,6 +64,9 @@ function AgentPromptControls({
   selector,
   onChange,
   originalSha,
+  draftSet,
+  isWorkingDraftMode,
+  onSwitchToWorkingDraft,
 }: AgentPromptControlsProps) {
   const [history, setHistory] = useState<PromptHistoryEntry[] | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -116,12 +130,14 @@ function AgentPromptControls({
     URL.revokeObjectURL(url);
   };
 
-  // Translate the underlying PromptSelector into a 4-way UI mode so that
-  // "Currently deployed (live main)" is its own first-class dropdown entry,
-  // distinct from "Pick historical SHA".
-  type UiMode = "text" | "live" | "original" | "sha";
-  const uiMode: UiMode =
-    selector.mode === "text"
+  // Translate the underlying PromptSelector into a 5-way UI mode so that
+  // "Working draft", "Currently deployed (live main)" and "Original (pinned)"
+  // are each their own first-class dropdown entries, distinct from "Pick
+  // historical SHA".
+  type UiMode = "working_draft" | "text" | "live" | "original" | "sha";
+  const uiMode: UiMode = isWorkingDraftMode
+    ? "working_draft"
+    : selector.mode === "text"
       ? "text"
       : selector.mode === "original"
         ? "original"
@@ -130,7 +146,9 @@ function AgentPromptControls({
           : "sha";
 
   const setUiMode = (next: UiMode) => {
-    if (next === "text") {
+    if (next === "working_draft") {
+      onSwitchToWorkingDraft();
+    } else if (next === "text") {
       // Reset value so the seeding effect re-fetches.
       onChange({ mode: "text", value: undefined });
     } else if (next === "live") {
@@ -141,6 +159,8 @@ function AgentPromptControls({
       onChange({ mode: "sha", value: undefined });
     }
   };
+
+  const draftAvailable = draftSet != null;
 
   return (
     <Box>
@@ -155,6 +175,9 @@ function AgentPromptControls({
             value={uiMode}
             onChange={(e) => setUiMode(e.target.value as UiMode)}
           >
+            {draftAvailable && (
+              <MenuItem value="working_draft">Working draft</MenuItem>
+            )}
             <MenuItem value="text">Edit inline</MenuItem>
             <MenuItem value="live">Currently deployed (live main)</MenuItem>
             <MenuItem value="original" disabled={!originalSha}>
@@ -201,9 +224,14 @@ function AgentPromptControls({
       {selector.mode === "text" && (
         <Box sx={{ mt: 1 }}>
           <TextField
-            value={textDraft}
+            value={selector.value ?? textDraft}
             onChange={(e) => {
               setTextDraft(e.target.value);
+              // Typing into a working_draft-mode textarea silently breaks
+              // the link to the persistent draft (per plan §D4): the value
+              // is preserved but the visible mode flips to "Edit inline" so
+              // the PI knows their typing is ephemeral and won't write back
+              // to /pi/drafts.
               onChange({ mode: "text", value: e.target.value });
             }}
             multiline
@@ -223,13 +251,15 @@ function AgentPromptControls({
             <Typography variant="caption" color="text.secondary">
               {seeding
                 ? "Loading…"
-                : `Seeded from ${originalSha ? `pinned SHA (${originalSha.slice(0, 7)})` : "head of main"} — edit freely.`}
+                : isWorkingDraftMode
+                  ? `Loaded from your working draft (set ${draftSet!.draft_set_id.slice(0, 8)}). Edits here are ephemeral.`
+                  : `Seeded from ${originalSha ? `pinned SHA (${originalSha.slice(0, 7)})` : "head of main"} — edit freely.`}
             </Typography>
             <Button
               size="small"
               startIcon={<DownloadIcon fontSize="small" />}
               onClick={downloadText}
-              disabled={seeding || !textDraft}
+              disabled={seeding || (!textDraft && !selector.value)}
             >
               Download
             </Button>
@@ -256,6 +286,13 @@ interface ReplayPanelProps {
   recordedFastEvalForTurn?: string | null;
   /** End-of-session deep-eval markdown (the only "original" we have). */
   recordedDeepEval?: string | null;
+  /**
+   * Reviewer name (the value gated by the passcode). When set and a draft
+   * set exists in localStorage for this reviewer, all three pickers default
+   * to "Working draft" mode so PIs can quickly verify a draft against a
+   * single user turn. (Phase D4.)
+   */
+  reviewer?: string | null;
 }
 
 export default function ReplayPanel({
@@ -270,12 +307,27 @@ export default function ReplayPanel({
   divergence,
   recordedFastEvalForTurn,
   recordedDeepEval,
+  reviewer,
 }: ReplayPanelProps) {
-  // All three default to "Edit inline" — the primary use of replay is to
-  // try ad-hoc prompt edits and see how the pipeline responds. The
-  // textareas seed themselves from the session's pinned SHA (or head of
-  // main if none was recorded). PIs who want to A/B against a historical
-  // version can switch the Mode dropdown.
+  // Snapshot of the reviewer's working draft set, taken whenever the dialog
+  // opens. We deliberately don't subscribe to live updates: replay is a
+  // verification step, not an editing surface, and PIs would be confused by
+  // mid-replay textarea content changes if they edited /pi/drafts in
+  // another tab.
+  const [draftSet, setDraftSet] = useState<DraftSet | null>(null);
+
+  // Tracks whether each picker is currently bound to the working draft.
+  // Typing into the textarea breaks this link (we set the flag to false in
+  // the same setter that flipped the underlying selector to inline-text)
+  // so the dropdown reverts to "Edit inline" — see Phase D4.
+  const [coachIsDraft, setCoachIsDraft] = useState(false);
+  const [fastEvalIsDraft, setFastEvalIsDraft] = useState(false);
+  const [deepEvalIsDraft, setDeepEvalIsDraft] = useState(false);
+
+  // All three default to "Edit inline" when no draft set exists for the
+  // active reviewer. With drafts present, they default to "Working draft"
+  // (see the open-effect below). Either way the textareas seed themselves
+  // from the appropriate source.
   const [coachPrompt, setCoachPrompt] = useState<PromptSelector>({
     mode: "text",
     value: undefined,
@@ -315,12 +367,74 @@ export default function ReplayPanel({
   // (otherwise stale state from a previous replay would leak in).
   useEffect(() => {
     if (!open) return;
-    setCoachPrompt({ mode: "text", value: undefined });
-    setFastEvalPrompt({ mode: "text", value: undefined });
-    setDeepEvalPrompt({ mode: "text", value: undefined });
+    const ds = reviewer ? getActiveDraftSet(reviewer) : null;
+    setDraftSet(ds);
+    if (ds) {
+      // Default each picker to Working draft mode — that's the whole point
+      // of this dialog when a synthesis has been run.
+      setCoachPrompt({ mode: "text", value: ds.drafts.coach });
+      setFastEvalPrompt({ mode: "text", value: ds.drafts.fast_eval });
+      setDeepEvalPrompt({ mode: "text", value: ds.drafts.deep_eval });
+      setCoachIsDraft(true);
+      setFastEvalIsDraft(true);
+      setDeepEvalIsDraft(true);
+    } else {
+      setCoachPrompt({ mode: "text", value: undefined });
+      setFastEvalPrompt({ mode: "text", value: undefined });
+      setDeepEvalPrompt({ mode: "text", value: undefined });
+      setCoachIsDraft(false);
+      setFastEvalIsDraft(false);
+      setDeepEvalIsDraft(false);
+    }
     setResult(null);
     setError(null);
-  }, [open, originalSha, turn]);
+  }, [open, originalSha, turn, reviewer]);
+
+  // The change handler the children call when *they* mutate the selector.
+  // We use it to detect a transition that breaks the working-draft link
+  // (anything that's not exactly the draft text → no longer "Working draft"
+  // mode). The setUiMode-driven path bypasses this by calling the setters
+  // directly via the dedicated working-draft helpers below.
+  const wrapSetter = (
+    agent: AgentKey,
+    set: (s: PromptSelector) => void,
+    setIsDraft: (b: boolean) => void,
+  ) => (next: PromptSelector) => {
+    set(next);
+    if (!draftSet) {
+      setIsDraft(false);
+      return;
+    }
+    const expected = draftSet.drafts[agent];
+    setIsDraft(next.mode === "text" && next.value === expected);
+  };
+
+  const setCoachFromChild = wrapSetter("coach", setCoachPrompt, setCoachIsDraft);
+  const setFastEvalFromChild = wrapSetter(
+    "fast_eval",
+    setFastEvalPrompt,
+    setFastEvalIsDraft,
+  );
+  const setDeepEvalFromChild = wrapSetter(
+    "deep_eval",
+    setDeepEvalPrompt,
+    setDeepEvalIsDraft,
+  );
+
+  const switchOneToWorkingDraft = (agent: AgentKey) => {
+    if (!draftSet) return;
+    const value = draftSet.drafts[agent];
+    if (agent === "coach") {
+      setCoachPrompt({ mode: "text", value });
+      setCoachIsDraft(true);
+    } else if (agent === "fast_eval") {
+      setFastEvalPrompt({ mode: "text", value });
+      setFastEvalIsDraft(true);
+    } else {
+      setDeepEvalPrompt({ mode: "text", value });
+      setDeepEvalIsDraft(true);
+    }
+  };
 
   const runReplay = async () => {
     setLoading(true);
@@ -374,13 +488,39 @@ export default function ReplayPanel({
     setCoachPrompt({ mode: "sha", value: "live" });
     setFastEvalPrompt({ mode: "sha", value: "live" });
     setDeepEvalPrompt({ mode: "sha", value: "live" });
+    setCoachIsDraft(false);
+    setFastEvalIsDraft(false);
+    setDeepEvalIsDraft(false);
   };
 
   const switchAllToText = () => {
     setCoachPrompt({ mode: "text", value: undefined });
     setFastEvalPrompt({ mode: "text", value: undefined });
     setDeepEvalPrompt({ mode: "text", value: undefined });
+    setCoachIsDraft(false);
+    setFastEvalIsDraft(false);
+    setDeepEvalIsDraft(false);
   };
+
+  const switchAllToWorkingDraft = () => {
+    if (!draftSet) return;
+    setCoachPrompt({ mode: "text", value: draftSet.drafts.coach });
+    setFastEvalPrompt({ mode: "text", value: draftSet.drafts.fast_eval });
+    setDeepEvalPrompt({ mode: "text", value: draftSet.drafts.deep_eval });
+    setCoachIsDraft(true);
+    setFastEvalIsDraft(true);
+    setDeepEvalIsDraft(true);
+  };
+
+  // Surface the indicator banner only when the PI has switched at least
+  // one picker *away* from working draft (per plan §D4).
+  const draftActive = draftSet != null;
+  const draftDriftCount =
+    draftActive
+      ? (coachIsDraft ? 0 : 1) +
+        (fastEvalIsDraft ? 0 : 1) +
+        (deepEvalIsDraft ? 0 : 1)
+      : 0;
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
@@ -449,24 +589,53 @@ export default function ReplayPanel({
           </Alert>
         )}
 
+        {draftActive && draftDriftCount > 0 && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={
+              <Button
+                size="small"
+                color="inherit"
+                onClick={switchAllToWorkingDraft}
+              >
+                Use working draft
+              </Button>
+            }
+          >
+            Replaying with custom prompts. Working drafts ({draftDriftCount}{" "}
+            picker{draftDriftCount === 1 ? "" : "s"} switched away) are
+            available — switch any picker to "Working draft" to test them.
+          </Alert>
+        )}
+
         <Stack spacing={2}>
           <AgentPromptControls
             agent="coach"
             selector={coachPrompt}
-            onChange={setCoachPrompt}
+            onChange={setCoachFromChild}
             originalSha={originalSha}
+            draftSet={draftSet}
+            isWorkingDraftMode={coachIsDraft}
+            onSwitchToWorkingDraft={() => switchOneToWorkingDraft("coach")}
           />
           <AgentPromptControls
             agent="fast_eval"
             selector={fastEvalPrompt}
-            onChange={setFastEvalPrompt}
+            onChange={setFastEvalFromChild}
             originalSha={originalSha}
+            draftSet={draftSet}
+            isWorkingDraftMode={fastEvalIsDraft}
+            onSwitchToWorkingDraft={() => switchOneToWorkingDraft("fast_eval")}
           />
           <AgentPromptControls
             agent="deep_eval"
             selector={deepEvalPrompt}
-            onChange={setDeepEvalPrompt}
+            onChange={setDeepEvalFromChild}
             originalSha={originalSha}
+            draftSet={draftSet}
+            isWorkingDraftMode={deepEvalIsDraft}
+            onSwitchToWorkingDraft={() => switchOneToWorkingDraft("deep_eval")}
           />
 
           <Divider>Optional model overrides</Divider>

@@ -361,10 +361,42 @@ async def _openrouter_call(
     Returns None on any failure (timeout, non-200, parse error). Logs elapsed
     time and token usage with the `kind` tag for cost visibility.
     """
+    msg, _usage = await _openrouter_call_with_usage(
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        tools=tools,
+        tool_choice=tool_choice,
+        timeout_seconds=timeout_seconds,
+        kind=kind,
+        student_id=student_id,
+        project_id=project_id,
+    )
+    return msg
+
+
+async def _openrouter_call_with_usage(
+    *,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    tools: Optional[list[dict]] = None,
+    tool_choice: Optional[dict] = None,
+    timeout_seconds: float,
+    kind: str,
+    student_id: str,
+    project_id: str,
+) -> tuple[Optional[dict], dict]:
+    """Like `_openrouter_call`, but also returns the OpenRouter `usage` block.
+
+    Returns `(message, usage_dict)`. On failure, returns `(None, {})`. The
+    usage dict carries OpenRouter's `prompt_tokens` / `completion_tokens` /
+    other token counters when available.
+    """
     api_key = server_module.OPENROUTER_API_KEY
     if not api_key:
         logger.warning(f"OPENROUTER_API_KEY not configured; {kind} skipped")
-        return None
+        return None, {}
 
     payload: dict[str, Any] = {
         "model": model,
@@ -403,14 +435,14 @@ async def _openrouter_call(
             f"openrouter_timeout kind={kind} student={student_id} project={project_id} "
             f"model={model} elapsed_seconds={elapsed:.3f}"
         )
-        return None
+        return None, {}
     except httpx.HTTPError as e:
         elapsed = time.monotonic() - start
         logger.warning(
             f"openrouter_http_error kind={kind} student={student_id} project={project_id} "
             f"model={model} elapsed_seconds={elapsed:.3f} error={e}"
         )
-        return None
+        return None, {}
 
     elapsed = time.monotonic() - start
     if resp.status_code != 200:
@@ -418,7 +450,7 @@ async def _openrouter_call(
             f"openrouter_non_200 kind={kind} student={student_id} project={project_id} "
             f"model={model} elapsed_seconds={elapsed:.3f} status={resp.status_code}"
         )
-        return None
+        return None, {}
 
     try:
         body = resp.json()
@@ -426,7 +458,7 @@ async def _openrouter_call(
         logger.warning(
             f"openrouter_parse_failed kind={kind} student={student_id} project={project_id}"
         )
-        return None
+        return None, {}
 
     usage = body.get("usage") or {}
     pt = usage.get("prompt_tokens")
@@ -438,9 +470,9 @@ async def _openrouter_call(
 
     choices = body.get("choices") or []
     if not choices:
-        return None
+        return None, usage if isinstance(usage, dict) else {}
     msg = choices[0].get("message") or {}
-    return msg
+    return msg, usage if isinstance(usage, dict) else {}
 
 
 def _extract_tool_args(message: dict, tool_name: str) -> Optional[dict]:

@@ -952,6 +952,15 @@ async def _append_feedback_entry(
 
     # Bust the index cache so the new feedback is visible immediately.
     _index_cache["ts"] = 0.0
+    # Bust the per-reviewer feedback cache used by the drafts widget so the
+    # `new feedback since last synth` counter updates without a 30s lag.
+    # Lazy import: pi_drafts imports pi_api, so importing it at module-load
+    # time would create a circular import.
+    try:
+        from . import pi_drafts
+        pi_drafts.invalidate_feedback_by_reviewer_cache()
+    except ImportError:
+        pass
     return {"id": new_id, "committed": True, "pushed": True}
 
 

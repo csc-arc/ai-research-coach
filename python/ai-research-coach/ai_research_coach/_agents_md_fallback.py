@@ -1,3 +1,16 @@
+"""Frozen offline copy of `public/AGENTS.md`.
+
+This constant is used by `pi_drafts._build_system_prompt` when the live fetch
+of the canonical AGENTS.md from GitHub fails (network down, rate-limit, 5xx).
+Synthesis must keep working end-to-end during a GitHub outage even if the
+editing guide it references is slightly stale.
+
+To refresh: run `python scripts/refresh_agents_md_fallback.py` from the
+`ai-research-coach/` repo root, then commit the result. CI fails the build
+when this constant has drifted >50 lines from `public/AGENTS.md`.
+"""
+
+AGENTS_MD_FALLBACK = """\
 # Agent Prompts — Developer Guide
 
 This directory contains the four prompts that drive the two-agent coaching pipeline. This document explains what each prompt does, how they relate to each other, and how to update them in response to PI feedback.
@@ -163,3 +176,4 @@ prompt structure changes:
 
 Validation warnings are advisory — they don't block downloads. The
 PI sees them inline so they can fix structural drift before opening a PR.
+"""

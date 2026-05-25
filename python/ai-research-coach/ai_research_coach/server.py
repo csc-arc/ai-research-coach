@@ -72,14 +72,16 @@ app = FastAPI(title="AI Research Coach Script Execution Server")
 
 
 def _mount_pi_router_once() -> None:
-    """Lazily mount the PI dashboard router. Recorder.py's module load is
+    """Lazily mount the PI dashboard routers. Recorder.py's module load is
     expensive (resolves env vars, sets up locks); we keep the import inside
     a helper so test paths that build a bare FastAPI app can opt in or out.
     """
     if getattr(app.state, "_pi_router_mounted", False):
         return
     from . import pi_api
+    from . import pi_drafts
     app.include_router(pi_api.router)
+    app.include_router(pi_drafts.router)
     app.state._pi_router_mounted = True
 
 
