@@ -227,9 +227,26 @@ export default function PIApp() {
     }
   }, [unlocked, reviewer]);
 
-  const handleBundleRefresh = useCallback(() => {
-    if (selected) loadBundle(selected);
-  }, [selected, loadBundle]);
+  // Refresh the current bundle in place — do NOT blank `bundle` or flip
+  // `bundleLoading`. Blanking would unmount SessionViewer mid-refresh, which
+  // resets its internal `tab` state to "summary" and yanks the reviewer out
+  // of the Transcript tab right after they submit an annotation.
+  const handleBundleRefresh = useCallback(async () => {
+    if (!selected) return;
+    try {
+      const b = await fetchSessionBundle(
+        selected.pi,
+        selected.project,
+        selected.student,
+        selected.ts,
+      );
+      setBundle(b);
+      setBundleError(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to refresh session";
+      setBundleError(msg);
+    }
+  }, [selected]);
 
   const reviewerChip = useMemo(
     () => (
