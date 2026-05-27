@@ -82,10 +82,40 @@ export const endSessionTool: QPTool = {
       });
 
       const data = await response.json().catch(() => ({}));
-      const status = (data?.status as string) || "recorder_failed";
-      const commitSha = data?.commit_sha as string | undefined;
-      const error = data?.error as string | undefined;
+      let status = (data?.status as string) || "recorder_failed";
+      let commitSha = data?.commit_sha as string | undefined;
+      let error = data?.error as string | undefined;
+      const token = data?.recorder_token as string | undefined;
 
+      // Poll until the background recorder task reaches a terminal status.
+      if (status === "running" && token) {
+        const deadline = Date.now() + 5 * 60_000;
+        const POLL_INTERVAL_MS = 2000;
+        while (status === "running" && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          try {
+            const poll = await fetch(
+              `${serverUrl}/api/session-status?token=${encodeURIComponent(token)}` +
+                `&passcode=${encodeURIComponent(passcode)}`,
+            );
+            const pdata = await poll.json().catch(() => ({}));
+            status = (pdata?.status as string) || "recorder_failed";
+            commitSha = pdata?.commit_sha as string | undefined;
+            error = pdata?.error as string | undefined;
+          } catch {
+            // Network blip mid-poll — keep trying until deadline.
+            // The recorder is still running server-side.
+          }
+        }
+        if (status === "running") {
+          status = "recorder_failed";
+          error = "poll_timeout";
+        }
+      }
+
+      // Fire onSessionEnded with the final terminal status, after polling completes.
+      // Calling it before the loop would fire with status="running", leaving
+      // recorderTriggeredRef unset and allowing beforeunload to double-fire.
       if (context.onSessionEnded) {
         try {
           context.onSessionEnded(status, error);
@@ -138,8 +168,10 @@ export const endSessionTool: QPTool = {
 
 Takes no parameters. Returns a JSON object with:
 - status: "recorded" | "already_recorded" | "queued_retry" | "recorder_failed"
+  ("running" is a transient internal state; you will never see it in normal flow)
 - coach_message_hint: a short instruction for how you should phrase your closing message
 - error: optional error string (only on failures)
+- recorder_token: internal token used for polling; ignore this field
 
 After this tool returns, deliver a brief, warm closing that follows the coach_message_hint guidance.`;
   },

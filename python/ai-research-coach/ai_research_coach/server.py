@@ -56,6 +56,12 @@ _inactivity_tasks: dict[tuple[str, str], asyncio.Task] = {}
 _fast_eval_tasks: dict[tuple[str, str], asyncio.Task] = {}
 _session_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
+# Recorder backgrounding — keyed by f"{student_id}:{project_id}:{session_start}"
+_recorder_status: dict[str, dict] = {}
+# Strong references to in-flight background tasks so GC cannot collect them before
+# they finish. Tasks remove themselves on completion via done_callback.
+_recorder_tasks: set[asyncio.Task] = set()
+
 # Subprocess env hardening: only pass through known-safe env vars.
 _SAFE_ENV_KEYS = {
     "PATH", "HOME", "USER", "SHELL", "TMPDIR",
@@ -197,9 +203,10 @@ class EndSessionRequest(BaseModel):
 
 
 class EndSessionResponse(BaseModel):
-    status: str  # "recorded" | "already_recorded" | "recorder_failed" | "queued_retry"
+    status: str  # "running" | "recorded" | "already_recorded" | "recorder_failed" | "queued_retry"
     commit_sha: Optional[str] = None
     error: Optional[str] = None
+    recorder_token: Optional[str] = None
 
 
 def validate_passcode(passcode: str) -> bool:
@@ -1146,18 +1153,51 @@ async def start_session(request: StartSessionRequest):
     )
 
 
-@app.post("/api/end-session", response_model=EndSessionResponse)
+@app.post("/api/end-session", response_model=EndSessionResponse, status_code=202)
 async def end_session(request: EndSessionRequest):
-    """Run the recorder for an active session. Acquires the per-session lock to
-    prevent racing with the inactivity-timer recorder."""
+    """Schedule the recorder in a background task and return immediately.
+
+    Returns HTTP 202 with a `recorder_token` the client can poll via
+    `GET /api/session-status`.  The per-session lock and the global
+    COACH_SESSIONS_GIT_LOCK are still honored — they run inside the background
+    task, not on the HTTP response path.
+    """
     if not validate_passcode(request.passcode):
         raise HTTPException(status_code=401, detail="Invalid passcode")
 
     validate_id(request.student_id, "student_id")
     validate_id(request.project_id, "project_id")
 
-    async with _get_session_lock(request.student_id, request.project_id):
-        try:
+    token = f"{request.student_id}:{request.project_id}:{request.session_start}"
+    _prune_recorder_status()
+
+    existing = _recorder_status.get(token)
+    if existing and existing["status"] != "running":
+        # Already terminal — return immediately without spawning a second task.
+        return EndSessionResponse(
+            status=existing["status"],
+            commit_sha=existing.get("commit_sha"),
+            error=existing.get("error"),
+            recorder_token=token,
+        )
+    if not existing:
+        _recorder_status[token] = {
+            "status": "running",
+            "commit_sha": None,
+            "error": None,
+            "updated_at": time.time(),
+        }
+        task = asyncio.create_task(_run_recorder_background(token, request))
+        _recorder_tasks.add(task)
+        task.add_done_callback(_recorder_tasks.discard)
+
+    return EndSessionResponse(status="running", recorder_token=token)
+
+
+async def _run_recorder_background(token: str, request: EndSessionRequest) -> None:
+    """Background task that runs the recorder and writes the terminal status."""
+    try:
+        async with _get_session_lock(request.student_id, request.project_id):
             result = await run_recorder(
                 student_id=request.student_id,
                 project_id=request.project_id,
@@ -1166,14 +1206,51 @@ async def end_session(request: EndSessionRequest):
                 session_end=request.session_end,
                 abrupt=request.abrupt,
             )
-        except Exception as e:
-            logger.error(f"end_session recorder failed: {e}")
-            return EndSessionResponse(status="recorder_failed", error=str(e))
+        _recorder_status[token] = {
+            "status": result.get("status", "recorder_failed"),
+            "commit_sha": result.get("commit_sha"),
+            "error": result.get("error"),
+            "updated_at": time.time(),
+        }
+    except Exception as e:
+        logger.error(f"end_session recorder failed (background, token={token}): {e}")
+        _recorder_status[token] = {
+            "status": "recorder_failed",
+            "commit_sha": None,
+            "error": str(e),
+            "updated_at": time.time(),
+        }
 
+
+def _prune_recorder_status(max_age_seconds: float = 3600.0) -> None:
+    """Drop entries older than 1 h. Cheap O(N); called on every read/write."""
+    now = time.time()
+    stale = [
+        k for k, v in _recorder_status.items()
+        if now - v.get("updated_at", 0) > max_age_seconds
+    ]
+    for k in stale:
+        del _recorder_status[k]
+
+
+@app.get("/api/session-status", response_model=EndSessionResponse)
+async def session_status(token: str, passcode: str):
+    """Return the current recorder status for a token issued by /api/end-session."""
+    if not validate_passcode(passcode):
+        raise HTTPException(status_code=401, detail="Invalid passcode")
+    _prune_recorder_status()
+    s = _recorder_status.get(token)
+    if not s:
+        return EndSessionResponse(
+            status="recorder_failed",
+            error="unknown_token",
+            recorder_token=token,
+        )
     return EndSessionResponse(
-        status=result.get("status", "recorder_failed"),
-        commit_sha=result.get("commit_sha"),
-        error=result.get("error"),
+        status=s["status"],
+        commit_sha=s.get("commit_sha"),
+        error=s.get("error"),
+        recorder_token=token,
     )
 
 
