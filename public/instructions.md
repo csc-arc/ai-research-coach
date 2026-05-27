@@ -72,16 +72,26 @@ fi
 
 ## Step 2 — Read the project description
 
-Fetch the project description from GitHub:
+Fetch the project description from GitHub. The project lives at
+`projects/${project_id}/` and consists of a required `project.md` (YAML
+frontmatter with `title`, `pi`, and `goals` followed by a Markdown body that
+is the project description) plus an optional sibling `resources.md` (a
+freeform reading list and references). Fetch both — `resources.md` may 404
+and that's fine:
 
 ```bash
-curl -sf "https://raw.githubusercontent.com/csc-arc/research-projects/main/projects/${project_id}/project.md"
+base="https://raw.githubusercontent.com/csc-arc/research-projects/main/projects/${project_id}"
+curl -sf "${base}/project.md"
+curl -sf "${base}/resources.md" || true
 ```
 
 Read the output carefully. Use it to understand:
-- What this project is about
-- The PI's GitHub username (you will need this for the master-tracker push at session end — call it `PI_USERNAME`)
-- The project objectives, materials, and any student repository URL
+- What this project is about (the body of `project.md`)
+- The PI's GitHub username from the YAML frontmatter (you will need this
+  for the master-tracker push at session end — call it `PI_USERNAME`)
+- The project goals from the YAML `goals:` list and any student repository
+  URL referenced in the body
+- The recommended reading and references in `resources.md` when present
 
 ## Step 3 — Read workspace state
 

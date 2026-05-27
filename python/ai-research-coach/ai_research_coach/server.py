@@ -904,10 +904,8 @@ async def start_session(request: StartSessionRequest):
             "No sessions yet.\n"
         )
 
-    project_md_url = (
-        "https://raw.githubusercontent.com/csc-arc/research-projects/main/projects/"
-        f"{request.project_id}/project.md"
-    )
+    project_md_url = recorder.project_md_url(request.project_id)
+    resources_md_url = recorder.resources_md_url(request.project_id)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(project_md_url)
@@ -921,6 +919,31 @@ async def start_session(request: StartSessionRequest):
                 )
             project_md_text = r.text
             project_md_bytes = r.content
+            # resources.md is optional. Treat 404 as "not present"; treat any
+            # other failure as recoverable and continue with project.md only,
+            # so a transient GitHub hiccup on the optional file doesn't block
+            # session start.
+            resources_md_text = ""
+            resources_md_bytes = b""
+            try:
+                rr = await client.get(resources_md_url)
+                if rr.status_code == 200:
+                    resources_md_text = rr.text
+                    resources_md_bytes = rr.content
+                elif rr.status_code != 404:
+                    logger.warning(
+                        "resources.md fetch returned HTTP %s for %s — "
+                        "continuing with project.md only",
+                        rr.status_code,
+                        request.project_id,
+                    )
+            except httpx.HTTPError as e:
+                logger.warning(
+                    "resources.md fetch failed for %s (%s) — "
+                    "continuing with project.md only",
+                    request.project_id,
+                    e,
+                )
     except httpx.HTTPError as e:
         return StartSessionResponse(
             success=False,
@@ -933,7 +956,9 @@ async def start_session(request: StartSessionRequest):
     pi = ""
     student_repo_url: Optional[str] = None
     if project_md_text.startswith("---"):
-        # YAML frontmatter
+        # YAML frontmatter — only single-line scalar values are read here.
+        # Goals (a YAML list) are intentionally not parsed; they flow into
+        # the coach prompt as part of project_description.
         end_idx = project_md_text.find("\n---", 3)
         if end_idx > 0:
             for line in project_md_text[3:end_idx].splitlines():
@@ -945,8 +970,16 @@ async def start_session(request: StartSessionRequest):
                     if val and val.lower() != "null":
                         student_repo_url = val
 
+    project_description_text = recorder.combine_project_artifacts(
+        project_md_text, resources_md_text
+    )
+
+    # Hash both files together so QA replay invalidates cached results when
+    # either project.md or resources.md changes.
     import hashlib
-    project_description_sha = hashlib.sha256(project_md_bytes).hexdigest()[:16]
+    project_description_sha = hashlib.sha256(
+        project_md_bytes + b"\n" + resources_md_bytes
+    ).hexdigest()[:16]
 
     if student_repo_url:
         try:
@@ -1073,7 +1106,7 @@ async def start_session(request: StartSessionRequest):
         first_visit=first_visit,
         resumed=resumed,
         session_start=session_start,
-        project_description=project_md_text,
+        project_description=project_description_text,
         pi=pi,
         student_repo_url=student_repo_url,
         cumulative_report=cumulative_report,

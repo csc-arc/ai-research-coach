@@ -214,16 +214,61 @@ async def resolve_prompts_sha() -> str:
     return digest
 
 
+PROJECT_DESCRIPTION_BASE_URL = (
+    "https://raw.githubusercontent.com/csc-arc/research-projects/main/projects"
+)
+
+
+def project_md_url(project_id: str) -> str:
+    return f"{PROJECT_DESCRIPTION_BASE_URL}/{project_id}/project.md"
+
+
+def resources_md_url(project_id: str) -> str:
+    return f"{PROJECT_DESCRIPTION_BASE_URL}/{project_id}/resources.md"
+
+
+def combine_project_artifacts(project_md_text: str, resources_md_text: str) -> str:
+    """Combine the project.md text and the (optional) resources.md text into
+    the single ``project_description`` string that flows into coach prompts
+    and evaluator inputs.
+
+    The resources.md content, when present, is appended under a ``# Resources``
+    heading so the coach has the full reading list as part of its working
+    context for the project. Both files keep their full contents (including
+    the YAML frontmatter on project.md) so the coach can read title, pi, and
+    goals directly without a side-channel.
+    """
+    parts = [project_md_text.rstrip()]
+    resources = resources_md_text.strip()
+    if resources:
+        parts.append("")
+        parts.append("---")
+        parts.append("")
+        parts.append("# Resources")
+        parts.append("")
+        parts.append(resources)
+        parts.append("")
+    return "\n".join(parts)
+
+
 async def _fetch_project_description(project_id: str) -> str:
-    """Fetch and cache the project description."""
-    url = (
-        "https://raw.githubusercontent.com/csc-arc/research-projects/main/projects/"
-        f"{project_id}/project.md"
-    )
+    """Fetch and cache the project description (project.md plus optional resources.md)."""
     try:
-        return await _fetch_text_with_cache(_project_description_cache, url)
+        project_md = await _fetch_text_with_cache(
+            _project_description_cache, project_md_url(project_id)
+        )
     except httpx.HTTPError:
         return ""
+    try:
+        resources_md = await _fetch_text_with_cache(
+            _project_description_cache, resources_md_url(project_id)
+        )
+    except httpx.HTTPError:
+        # resources.md is optional; a 404 (or any fetch error) is fine — fall
+        # back to project.md alone. The cache miss means the next call will
+        # retry, which is acceptable at session-start scale.
+        resources_md = ""
+    return combine_project_artifacts(project_md, resources_md)
 
 
 # ---------------------------------------------------------------------------

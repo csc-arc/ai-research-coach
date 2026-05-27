@@ -2,8 +2,19 @@
  * Fetches the list of available research projects from the public
  * csc-arc/research-projects GitHub repo via the Contents API.
  *
- * Each project lives at projects/<slug>/project.md with YAML frontmatter
- * containing at minimum: title, pi, description.
+ * Each project lives at projects/<slug>/project.md. The file format is:
+ *   ---
+ *   title: "..."
+ *   pi: "..."
+ *   goals:           # optional
+ *     - "..."
+ *   ---
+ *
+ *   <Markdown body — this is the project description>
+ *
+ * The first paragraph of the body is used as a short preview ("description")
+ * shown in the project picker. The full body is what the coach reads as the
+ * project description at runtime (handled server-side by start_session).
  */
 
 import { useEffect, useState } from 'react';
@@ -12,6 +23,11 @@ export interface Project {
   slug: string;
   title: string;
   pi: string;
+  /**
+   * A short, single-paragraph preview of the project body, suitable for the
+   * project picker's secondary text. The full project description is the
+   * body of project.md and is loaded server-side at session start.
+   */
   description: string;
 }
 
@@ -23,25 +39,66 @@ export type ProjectsState =
 const PROJECTS_REPO = 'csc-arc/research-projects';
 const PROJECTS_PATH = 'projects';
 
+interface ParsedProjectMd {
+  /** Single-line scalar frontmatter values (e.g. title, pi). */
+  scalars: Record<string, string>;
+  /** Markdown body following the frontmatter. */
+  body: string;
+}
+
 /**
- * Parse simple YAML frontmatter (--- ... ---) into a string→string map.
- * Handles quoted values and single-line scalars only — sufficient for
- * title/pi/description. Block scalars (| and >) are not supported.
+ * Parse a project.md into its YAML scalar frontmatter values and the body.
+ * Only single-line scalar values are extracted from the frontmatter; YAML
+ * lists (e.g. `goals:`) are intentionally ignored — the picker only needs
+ * `title` and `pi`. Block scalars (`|` and `>`) are not supported.
  */
-function parseFrontmatter(markdown: string): Record<string, string> {
-  const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return {};
-  const result: Record<string, string> = {};
-  for (const line of match[1].split(/\r?\n/)) {
+function parseProjectMd(markdown: string): ParsedProjectMd {
+  const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { scalars: {}, body: markdown };
+
+  const scalars: Record<string, string> = {};
+  const fmLines = match[1].split(/\r?\n/);
+  for (const line of fmLines) {
+    // Skip indented lines (continuations or list items under a parent key).
+    if (/^\s/.test(line)) continue;
     const colon = line.indexOf(':');
     if (colon === -1) continue;
     const key = line.slice(0, colon).trim().toLowerCase();
     const raw = line.slice(colon + 1).trim();
-    // Strip surrounding quotes if present
+    if (!key || !raw) continue;
+    // Strip surrounding quotes if present.
     const value = raw.replace(/^["']|["']$/g, '');
-    if (key && value) result[key] = value;
+    scalars[key] = value;
   }
-  return result;
+
+  return { scalars, body: match[2] };
+}
+
+/**
+ * Extract a short, picker-friendly preview from the markdown body. Skips
+ * leading blank lines and ATX headings (`# ...`) and returns the first
+ * non-empty prose paragraph collapsed to a single line.
+ */
+function extractBodyPreview(body: string): string {
+  const lines = body.split(/\r?\n/);
+  const paragraph: string[] = [];
+  let inParagraph = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line === '') {
+      if (inParagraph) break;
+      continue;
+    }
+    if (line.startsWith('#')) {
+      if (inParagraph) break;
+      continue;
+    }
+    paragraph.push(line);
+    inParagraph = true;
+  }
+
+  return paragraph.join(' ').trim();
 }
 
 export function useProjects(): ProjectsState {
@@ -66,12 +123,12 @@ export function useProjects(): ProjectsState {
             const res = await fetch(rawUrl);
             if (!res.ok) throw new Error(`${slug}/project.md: ${res.status}`);
             const text = await res.text();
-            const fm = parseFrontmatter(text);
+            const { scalars, body } = parseProjectMd(text);
             return {
               slug,
-              title: fm['title'] ?? slug,
-              pi: fm['pi'] ?? '',
-              description: fm['description'] ?? '',
+              title: scalars['title'] ?? slug,
+              pi: scalars['pi'] ?? '',
+              description: extractBodyPreview(body),
             };
           })
         );
