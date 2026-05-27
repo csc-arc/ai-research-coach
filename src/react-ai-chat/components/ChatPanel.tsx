@@ -26,7 +26,7 @@ import CompressConfirmDialog from "./CompressConfirmDialog";
 import ChatSettingsDialog from "./ChatSettingsDialog";
 import useChat from "../hooks/useChat";
 import { useTypingEffect } from "../hooks/useTypingEffect";
-import { ChatPanelProps } from "../types";
+import { ChatPanelProps, PasteMeta } from "../types";
 
 export function ChatPanel({
   onCompletion,
@@ -185,7 +185,7 @@ export function ChatPanel({
   const lastSettledIndexRef = useRef<number>(-1);
   const wasRespondingRef = useRef<boolean>(false);
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(async (pasteMeta?: PasteMeta) => {
     if (newPrompt.trim() === "" || responding || compressing) return;
     const message = newPrompt.trim();
     setNewPrompt("");
@@ -195,7 +195,7 @@ export function ChatPanel({
     // its errors and surfacing console warnings.
     if (onUserMessageSubmit) {
       try {
-        await onUserMessageSubmit(message);
+        await onUserMessageSubmit(message, pasteMeta);
       } catch (e) {
         console.warn("onUserMessageSubmit failed:", e);
       }

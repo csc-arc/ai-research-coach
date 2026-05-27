@@ -41,7 +41,8 @@ export type {
   
   // Component props
   ChatPanelProps,
-  
+  PasteMeta,
+
   // Utility types
   ParsedSuggestions,
 } from "./types";

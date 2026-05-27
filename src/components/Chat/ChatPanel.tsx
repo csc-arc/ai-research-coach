@@ -8,7 +8,7 @@ import { logMessage } from "../../chat/logMessage";
 import { tools } from "../../chat/tools";
 import ChatSettingsDialog from "./ChatSettingsDialog";
 import { OutputEmitter } from "../../outputs/types";
-import { ChatMessage, ChatPanel, ToolContext } from "../../react-ai-chat";
+import { ChatMessage, ChatPanel, PasteMeta, ToolContext } from "../../react-ai-chat";
 import { getServerUrl } from "../../serverConfig";
 import { useStudentProject } from "../../studentProject";
 
@@ -123,10 +123,22 @@ Available tools:
   const recorderTriggeredRef = useRef<boolean>(false);
 
   const onUserMessageSubmit = useCallback(
-    async (content: string) => {
+    async (content: string, pasteMeta?: PasteMeta) => {
       chatMessagesCountRef.current += 1;
       if (!studentId || !projectId) return;
-      await logMessage(studentId, projectId, "user", content);
+      // Compose the optional paste payload here so logMessage's signature
+      // stays a single object — easier to evolve if we add more fields
+      // later. final_char_count comes from the submitted content, not the
+      // post-trim length, so analysts can match it against `content` in
+      // the JSONL row.
+      const fullMeta = pasteMeta
+        ? {
+            paste_event_count: pasteMeta.paste_event_count,
+            paste_char_count: pasteMeta.paste_char_count,
+            final_char_count: content.length,
+          }
+        : undefined;
+      await logMessage(studentId, projectId, "user", content, fullMeta);
     },
     [studentId, projectId]
   );

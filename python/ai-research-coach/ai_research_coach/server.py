@@ -132,6 +132,25 @@ class LogMessageRequest(BaseModel):
     role: str  # "user" | "assistant"
     content: str
     timestamp: str  # ISO-8601 from client
+    # Optional paste-detection signal. Only meaningful on user-role
+    # messages; defensively dropped from assistant rows. See
+    # `notes/dev-0526/plans/paste-detection-plan.md`. Field-level bounds
+    # produce a clean 422 on malformed clients.
+    paste_event_count: Optional[int] = Field(default=None, ge=0, le=1_000)
+    paste_char_count: Optional[int] = Field(default=None, ge=0, le=1_000_000)
+    final_char_count: Optional[int] = Field(default=None, ge=0, le=1_000_000)
+
+
+# Canonical list of paste-meta keys. Keep in sync with the
+# `LogMessageRequest` paste_* fields above and with
+# `recorder._strip_paste_meta` (imported from there). Adding a new
+# paste field without updating both call sites will silently leak it to
+# the recorder LLM and break the v1 "no LLM behavior change" invariant.
+PASTE_META_FIELDS: tuple[str, ...] = (
+    "paste_event_count",
+    "paste_char_count",
+    "final_char_count",
+)
 
 
 class LogMessageResponse(BaseModel):
@@ -595,11 +614,21 @@ async def log_message(request: LogMessageRequest, background_tasks: BackgroundTa
         if not active_path.exists():
             return LogMessageResponse(success=True)
 
-        entry = {
+        entry: dict[str, object] = {
             "timestamp": request.timestamp,
             "role": request.role,
             "content": request.content,
         }
+        # Paste metadata is user-only; defensively drop it on assistant
+        # rows so a misbehaving client can't pollute the transcript.
+        # Omit each field when the client didn't send it (vs. writing
+        # `null`) so historical rows stay clean and the absence-vs-zero
+        # distinction is preserved for analysts.
+        if request.role == "user":
+            for field in PASTE_META_FIELDS:
+                value = getattr(request, field, None)
+                if value is not None:
+                    entry[field] = value
         try:
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")

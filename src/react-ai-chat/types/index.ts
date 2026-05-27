@@ -1,6 +1,22 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
+ * Per-message paste metadata captured from the chat input.
+ *
+ * Records *intent to paste* (event count + clipboard char totals), not
+ * what survives editing. See `notes/dev-0526/plans/paste-detection-plan.md`
+ * for full semantics, including the Windows `\r\n` overcount caveat and
+ * the image-paste case (events>0, chars==0).
+ *
+ * Field names match the wire format used by /api/log-message and the
+ * chat-log.jsonl entry, so the shape is canonical end-to-end.
+ */
+export interface PasteMeta {
+  paste_event_count: number;
+  paste_char_count: number;
+}
+
+/**
  * Function call within a tool call
  */
 export interface FunctionCall {
@@ -270,8 +286,14 @@ export interface ChatPanelProps {
   /**
    * Fired synchronously when the user submits a message, before /api/completion
    * is called. Used for fast-eval triggering (must precede the completion call).
+   *
+   * The optional `meta` carries paste-detection signal captured by
+   * `ChatInput`. It is omitted when the message had no paste events.
    */
-  onUserMessageSubmit?: (content: string) => Promise<void> | void;
+  onUserMessageSubmit?: (
+    content: string,
+    meta?: PasteMeta,
+  ) => Promise<void> | void;
 
   /**
    * Fired when assistant turns have settled (post-stream). Used for

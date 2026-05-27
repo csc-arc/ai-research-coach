@@ -1490,6 +1490,39 @@ def _validate_recorder_args(
     return None
 
 
+def _strip_paste_meta(transcript_text: str) -> str:
+    """Remove paste-detection fields from every JSONL row.
+
+    Called once on `transcript_text` before it is pasted into the
+    recorder LLM prompt, so paste metadata never reaches the model.
+    Preserves the v1 "no LLM behavior change" invariant of
+    `notes/dev-0526/plans/paste-detection-plan.md`.
+
+    The archived `transcript.jsonl` (copied to coach-sessions) is **not**
+    redacted — only the live LLM prompt is. Analysts working off the
+    archive still see the full signal.
+
+    Lines that aren't valid JSON pass through unchanged so a partially
+    corrupt transcript doesn't get silently rewritten. Fast-eval and
+    deep-eval read structured `role`/`content` only, so this helper is
+    not needed there.
+    """
+    out_lines: list[str] = []
+    for line in transcript_text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            out_lines.append(line)
+            continue
+        if isinstance(obj, dict):
+            for key in server_module.PASTE_META_FIELDS:
+                obj.pop(key, None)
+        out_lines.append(json.dumps(obj, ensure_ascii=False))
+    return "\n".join(out_lines)
+
+
 def _render_recorder_user_message(
     *,
     student_id: str,
@@ -1536,7 +1569,11 @@ def _render_recorder_user_message(
     parts.append(deep_eval_text.strip() or "(empty)")
     parts.append("")
     parts.append("## Transcript (chat-log.jsonl)")
-    parts.append(transcript_text.strip() or "(empty)")
+    # Strip paste-detection fields before sending to the recorder LLM.
+    # See `_strip_paste_meta` and
+    # `notes/dev-0526/plans/paste-detection-plan.md`.
+    redacted_transcript = _strip_paste_meta(transcript_text)
+    parts.append(redacted_transcript.strip() or "(empty)")
     parts.append("")
     parts.append(
         "Produce exactly one call to `submit_artifacts` with all three "
