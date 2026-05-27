@@ -17,7 +17,7 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import StopIcon from "@mui/icons-material/Stop";
 import DownloadIcon from "@mui/icons-material/Download";
-import UploadIcon from "@mui/icons-material/Upload";
+// import UploadIcon from "@mui/icons-material/Upload";
 import CompressIcon from "@mui/icons-material/Compress";
 import ChatInput from "./ChatInput";
 import MessageItem from "./MessageItem";
@@ -26,7 +26,7 @@ import CompressConfirmDialog from "./CompressConfirmDialog";
 import ChatSettingsDialog from "./ChatSettingsDialog";
 import useChat from "../hooks/useChat";
 import { useTypingEffect } from "../hooks/useTypingEffect";
-import { ChatPanelProps, PasteMeta } from "../types";
+import { ChatMessage, ChatPanelProps, PasteMeta } from "../types";
 
 export function ChatPanel({
   onCompletion,
@@ -83,7 +83,7 @@ export function ChatPanel({
   const [settingsDialogOpen, setSettingsDialogOpen] = useState<boolean>(false);
   const [errorExpanded, setErrorExpanded] = useState<boolean>(false);
   const conversationRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Guard so we fire at most once per mount, even if conditions change multiple times
   const hasAutoStartedRef = useRef(false);
@@ -282,65 +282,111 @@ export function ChatPanel({
     [setChatModel, onModelChange]
   );
 
-  const handleDownloadChat = useCallback(() => {
-    const chatExport = {
-      version: "1.0",
-      exportDate: new Date().toISOString(),
-      chat: {
-        model: chat.model,
-        messages: chat.messages,
-        totalUsage: chat.totalUsage,
-      },
+  const handleDownloadMarkdown = useCallback(() => {
+    const extractText = (
+      content: ChatMessage["content"]
+    ): string => {
+      if (content == null) return "";
+      if (typeof content === "string") return content;
+      return content
+        .map((part) =>
+          part.type === "text" ? part.text : "[image]"
+        )
+        .join("\n\n");
     };
 
-    const blob = new Blob([JSON.stringify(chatExport, null, 2)], {
-      type: "application/json",
+    const lines: string[] = [];
+    const now = new Date();
+    lines.push("# AI Research Coach — Conversation");
+    lines.push("");
+    lines.push(`_Exported ${now.toISOString().replace("T", " ").slice(0, 16)} UTC_`);
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+
+    for (const msg of chat.messages) {
+      if (msg.role === "tool") continue;
+      const text = extractText(msg.content).trim();
+      if (!text) continue;
+      const heading = msg.role === "user" ? "## You" : "## Assistant";
+      lines.push(heading);
+      lines.push("");
+      lines.push(text);
+      lines.push("");
+    }
+
+    const blob = new Blob([lines.join("\n")], {
+      type: "text/markdown;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `chat-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `conversation-${now.toISOString().slice(0, 10)}.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [chat]);
 
-  const handleUploadChat = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
+  // const handleDownloadChat = useCallback(() => {
+  //   const chatExport = {
+  //     version: "1.0",
+  //     exportDate: new Date().toISOString(),
+  //     chat: {
+  //       model: chat.model,
+  //       messages: chat.messages,
+  //       totalUsage: chat.totalUsage,
+  //     },
+  //   };
+  //
+  //   const blob = new Blob([JSON.stringify(chatExport, null, 2)], {
+  //     type: "application/json",
+  //   });
+  //   const url = URL.createObjectURL(blob);
+  //   const a = document.createElement("a");
+  //   a.href = url;
+  //   a.download = `chat-${new Date().toISOString().slice(0, 10)}.json`;
+  //   document.body.appendChild(a);
+  //   a.click();
+  //   document.body.removeChild(a);
+  //   URL.revokeObjectURL(url);
+  // }, [chat]);
 
-  const handleFileChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      if (!file) return;
+  // const handleUploadChat = useCallback(() => {
+  //   fileInputRef.current?.click();
+  // }, []);
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          const content = e.target?.result as string;
-          const parsed = JSON.parse(content);
-
-          // Validate the structure
-          if (!parsed.chat || !parsed.chat.messages || !Array.isArray(parsed.chat.messages)) {
-            throw new Error("Invalid chat file format");
-          }
-
-          // Load the chat using the loadChat function from useChat
-          if (window.confirm(`Load chat with ${parsed.chat.messages.length} messages? This will replace the current conversation.`)) {
-            loadChat(parsed.chat);
-          }
-        } catch (err) {
-          alert(`Error loading chat file: ${err instanceof Error ? err.message : "Unknown error"}`);
-        }
-      };
-      reader.readAsText(file);
-
-      // Reset file input
-      event.target.value = "";
-    },
-    [loadChat]
-  );
+  // const handleFileChange = useCallback(
+  //   (event: React.ChangeEvent<HTMLInputElement>) => {
+  //     const file = event.target.files?.[0];
+  //     if (!file) return;
+  //
+  //     const reader = new FileReader();
+  //     reader.onload = (e) => {
+  //       try {
+  //         const content = e.target?.result as string;
+  //         const parsed = JSON.parse(content);
+  //
+  //         // Validate the structure
+  //         if (!parsed.chat || !parsed.chat.messages || !Array.isArray(parsed.chat.messages)) {
+  //           throw new Error("Invalid chat file format");
+  //         }
+  //
+  //         // Load the chat using the loadChat function from useChat
+  //         if (window.confirm(`Load chat with ${parsed.chat.messages.length} messages? This will replace the current conversation.`)) {
+  //           loadChat(parsed.chat);
+  //         }
+  //       } catch (err) {
+  //         alert(`Error loading chat file: ${err instanceof Error ? err.message : "Unknown error"}`);
+  //       }
+  //     };
+  //     reader.readAsText(file);
+  //
+  //     // Reset file input
+  //     event.target.value = "";
+  //   },
+  //   [loadChat]
+  // );
 
   // Get display label for current model
   const currentModelLabel = useMemo(() => {
@@ -439,31 +485,19 @@ export function ChatPanel({
               </span>
             </Tooltip>
           )}
+          {/* JSON upload + JSON download buttons disabled; the only export is Markdown below */}
           {enableExport && (
-            <>
-              <Tooltip title="Upload Chat">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={handleUploadChat}
-                    disabled={responding || compressing}
-                  >
-                    <UploadIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Download Chat">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={handleDownloadChat}
-                    disabled={chat.messages.length === 0}
-                  >
-                    <DownloadIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </>
+            <Tooltip title="Download conversation (Markdown)">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={handleDownloadMarkdown}
+                  disabled={chat.messages.length === 0}
+                >
+                  <DownloadIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
           )}
           <Tooltip title="New Chat">
             <span>
@@ -720,7 +754,8 @@ export function ChatPanel({
         />
       )}
 
-      {/* Hidden File Input for Upload */}
+      {/* Hidden File Input for Upload — disabled with JSON upload feature */}
+      {/*
       {enableExport && (
         <input
           type="file"
@@ -730,6 +765,7 @@ export function ChatPanel({
           onChange={handleFileChange}
         />
       )}
+      */}
     </Box>
   );
 }
