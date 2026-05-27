@@ -28,6 +28,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import RateReviewIcon from "@mui/icons-material/RateReview";
 import ReplayIcon from "@mui/icons-material/Replay";
 import UpdateIcon from "@mui/icons-material/Update";
+import DownloadIcon from "@mui/icons-material/Download";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CoachIssueReviewEntry,
@@ -542,11 +543,54 @@ function TranscriptTab({
   // Replay state — opened from a specific user turn.
   const [replayState, setReplayState] = useState<{ turn: number } | null>(null);
 
+  const handleDownloadMarkdown = useCallback(() => {
+    const lines: string[] = [];
+    lines.push(`# Transcript — ${student} on ${project}`);
+    lines.push("");
+    lines.push(`_PI: ${pi}_  •  _Session: ${sessionTs}_`);
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+    for (const msg of transcript) {
+      if (msg.role !== "user" && msg.role !== "assistant") continue;
+      const text = (msg.content ?? "").trim();
+      if (!text) continue;
+      lines.push(msg.role === "user" ? "## Student" : "## Arc");
+      lines.push("");
+      lines.push(text);
+      lines.push("");
+    }
+
+    const blob = new Blob([lines.join("\n")], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const safeTs = sessionTs.replace(/[:+]/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `transcript-${student}-${safeTs}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [transcript, pi, project, student, sessionTs]);
+
   // Walk the transcript, counting user turns 1-indexed so we can correlate
   // each user message with the fast-eval entry that was emitted afterward.
   let userTurn = 0;
   return (
     <Stack spacing={2}>
+      <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<DownloadIcon fontSize="small" />}
+          onClick={handleDownloadMarkdown}
+          disabled={transcript.length === 0}
+        >
+          Download Markdown
+        </Button>
+      </Box>
       {transcript.length === 0 && (
         <Alert severity="info">No transcript was recorded for this session.</Alert>
       )}
