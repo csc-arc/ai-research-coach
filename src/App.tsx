@@ -11,7 +11,12 @@ import { useOutputs } from './outputs/useOutputs';
 import { OutputPanel } from './components/Outputs/OutputPanel';
 import { EditLocalInstructionsDialog } from './components/Instructions/EditLocalInstructionsDialog';
 import { getServerUrl } from './serverConfig';
-import { getOrPromptPasscode } from './chat/passcodeStorage';
+import {
+  clearPasscode,
+  getOrPromptPasscode,
+  promptForPasscode,
+  storePasscode,
+} from './chat/passcodeStorage';
 import { ChatMessage } from './react-ai-chat';
 
 // Create a custom theme with better colors for diffs
@@ -223,25 +228,49 @@ function AppContent() {
     const start = async () => {
       setSessionState({ status: 'loading' });
       const serverUrl = getServerUrl();
-      const passcode = await getOrPromptPasscode(serverUrl);
+      let passcode = await getOrPromptPasscode(serverUrl);
       if (cancelled) return;
       if (!passcode) {
         setSessionState({ status: 'error', error: 'Passcode is required to start a session.' });
         return;
       }
       try {
-        const response = await fetch(`${serverUrl}/api/start-session`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            passcode,
-            student_id: queryParams.student_id,
-            project_id: queryParams.project_id,
-          }),
-        });
+        const callStart = (pc: string) =>
+          fetch(`${serverUrl}/api/start-session`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              passcode: pc,
+              student_id: queryParams.student_id,
+              project_id: queryParams.project_id,
+            }),
+          });
+
+        let response = await callStart(passcode);
+        // On 401, the stored passcode is wrong — clear it and re-prompt.
+        // Without this, sessionStorage caches the bad value across reloads
+        // and the user is permanently locked out of the prompt.
+        if (response.status === 401) {
+          clearPasscode(serverUrl);
+          const next = promptForPasscode(serverUrl);
+          if (cancelled) return;
+          if (!next) {
+            setSessionState({
+              status: 'error',
+              error: 'Passcode is required to start a session.',
+            });
+            return;
+          }
+          storePasscode(serverUrl, next);
+          passcode = next;
+          response = await callStart(next);
+        }
         const data = await response.json().catch(() => ({}));
         if (cancelled) return;
         if (!response.ok || !data.success) {
+          // If the second attempt still came back 401, clear again so the
+          // next page load surfaces the prompt rather than silently failing.
+          if (response.status === 401) clearPasscode(serverUrl);
           const detail = data?.error || data?.detail || `${response.status} ${response.statusText}`;
           setSessionState({ status: 'error', error: detail });
           return;
