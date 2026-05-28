@@ -46,9 +46,15 @@ export const useOutputs = () => {
    * Request approval for a script execution
    */
   const requestApproval = useCallback((outputId: string): Promise<boolean> => {
-    // Check for auto-approve query parameter
-    const autoApprove = new URLSearchParams(window.location.search).get('auto-approve') === '1';
-    
+    // Auto-approve scripts when either the explicit `auto-approve=1` flag is
+    // set, OR the outputs pane is hidden — without the pane, the user has no
+    // way to click "Run". The latter is the common case for student chat
+    // sessions (see handleInstructions in App.tsx which appends
+    // ?hide-output-panel=1 on nav).
+    const params = new URLSearchParams(window.location.search);
+    const autoApprove =
+      params.get('auto-approve') === '1' || params.get('hide-output-panel') === '1';
+
     if (autoApprove) {
       // Auto-approve and update output state immediately
       setOutputs(prev => prev.map(o => {
