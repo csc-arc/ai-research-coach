@@ -71,8 +71,13 @@ The full replacement body of the cross-session report. Sections (in this order):
 3. `## Current status` — one or two sentences.
 4. `## Progress to date` — narrative of what the student has accomplished across all sessions, including this one.
 5. `## Recommended next focus` — what the PI should know about the student's trajectory.
-6. **`## Coach style notes`** — bullet list of evidence-based personalization signals (see below). The heading must be exactly `## Coach style notes` (case-sensitive, level 2, no trailing punctuation) — the loader extracts it by string match.
-7. **`## Notes for PI`** (only if recurring `coach_issues` were flagged) — one bullet per category that crossed the recurrence threshold, naming the category, summarizing the pattern, and pointing the PI at the session evaluation as evidence.
+6. **`## Student repo`** — the STUDENT's project repository URL when known. The next session's coach reads this section to avoid re-asking the STUDENT for a URL they already provided. Body format:
+   - `URL: <full https URL>` — if a URL appears anywhere in this session's transcript, or was already recorded in the prior cumulative report. Prefer the most recent URL the STUDENT stated in this session if it conflicts with the prior report.
+   - `URL: not yet provided` — if neither this session nor the prior cumulative report has one. The coach will surface it again when naturally relevant.
+
+   Do not include clone paths, branch info, commit-level activity, or other transient details here — only the URL.
+7. **`## Coach style notes`** — bullet list of evidence-based personalization signals (see below). The heading must be exactly `## Coach style notes` (case-sensitive, level 2, no trailing punctuation) — the loader extracts it by string match.
+8. **`## Notes for PI`** (only if recurring `coach_issues` were flagged) — one bullet per category that crossed the recurrence threshold, naming the category, summarizing the pattern, and pointing the PI at the session evaluation as evidence.
 
 #### `## Coach style notes` — scope and merging
 
