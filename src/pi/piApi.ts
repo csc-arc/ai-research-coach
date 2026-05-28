@@ -186,9 +186,19 @@ export interface SessionRatingEntry extends FeedbackEntryBase {
   rating: "great" | "ok" | "poor";
 }
 
+export type TurnAnnotationTag =
+  | "coach_problem"
+  | "coach_good"
+  | "student_engaged"
+  | "student_struggling"
+  | "student_solution_seeking"
+  | "student_off_topic"
+  | "student_issue"
+  | "note";
+
 export interface TurnAnnotationEntry extends FeedbackEntryBase {
   turn: number;
-  tag: "coach_problem" | "coach_good" | "student_issue" | "note";
+  tag: TurnAnnotationTag;
 }
 
 export interface CoachIssueReviewEntry extends FeedbackEntryBase {
@@ -362,7 +372,7 @@ export interface SessionFeedbackPost extends FeedbackPostBase {
 
 export interface TurnFeedbackPost extends FeedbackPostBase {
   turn: number;
-  tag: "coach_problem" | "coach_good" | "student_issue" | "note";
+  tag: TurnAnnotationTag;
 }
 
 export interface IssueFeedbackPost extends FeedbackPostBase {

@@ -836,7 +836,20 @@ _FEEDBACK_SCHEMA: dict[str, list] = {
 
 
 _VALID_SESSION_RATINGS = {"great", "ok", "poor"}
-_VALID_TURN_TAGS = {"coach_problem", "coach_good", "student_issue", "note"}
+# Coach-row annotations: coach_good, coach_problem, note.
+# Student-row annotations: student_engaged, student_struggling,
+# student_solution_seeking, student_off_topic.
+# student_issue is kept for back-compat with older annotations.
+_VALID_TURN_TAGS = {
+    "coach_problem",
+    "coach_good",
+    "student_engaged",
+    "student_struggling",
+    "student_solution_seeking",
+    "student_off_topic",
+    "student_issue",
+    "note",
+}
 _VALID_VERDICTS = {"agree", "disagree", "partial"}
 
 

@@ -137,6 +137,33 @@ interface TurnAnnotationWidgetProps {
   onReviewerMissing: () => void;
   existing: TurnAnnotationEntry[];
   onSubmit: (body: TurnFeedbackPost) => void;
+  /** Which tag values appear in the dropdown. Defaults to coach-row tags
+   * for back-compat. Student-row widgets pass the student tag set. */
+  availableTags?: TurnAnnotationEntry["tag"][];
+  /** Override the "+ annotate this turn" label. */
+  ctaLabel?: string;
+}
+
+const DEFAULT_COACH_TAGS: TurnAnnotationEntry["tag"][] = [
+  "note",
+  "coach_good",
+  "coach_problem",
+];
+
+function tagBorderColor(tag: TurnAnnotationEntry["tag"]): string {
+  switch (tag) {
+    case "coach_problem":
+    case "student_struggling":
+    case "student_solution_seeking":
+    case "student_off_topic":
+    case "student_issue":
+      return "warning.main";
+    case "coach_good":
+    case "student_engaged":
+      return "success.main";
+    default:
+      return "info.main";
+  }
 }
 
 export function TurnAnnotationWidget({
@@ -149,6 +176,8 @@ export function TurnAnnotationWidget({
   onReviewerMissing,
   existing,
   onSubmit,
+  availableTags = DEFAULT_COACH_TAGS,
+  ctaLabel = "+ annotate this turn",
 }: TurnAnnotationWidgetProps) {
   const [open, setOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<TurnAnnotationEntry | null>(null);
@@ -166,7 +195,7 @@ export function TurnAnnotationWidget({
                 fontSize: 12,
                 p: 0.5,
                 borderLeft: 3,
-                borderColor: head.tag === "coach_problem" ? "warning.main" : "info.main",
+                borderColor: tagBorderColor(head.tag),
                 pl: 1,
               }}
             >
@@ -264,7 +293,7 @@ export function TurnAnnotationWidget({
         onClick={() => setOpen(true)}
         sx={{ textTransform: "none", py: 0 }}
       >
-        + annotate this turn
+        {ctaLabel}
       </Button>
       {open && (
         <TurnAnnotationForm
@@ -274,6 +303,7 @@ export function TurnAnnotationWidget({
           sessionTs={sessionTs}
           turn={turn}
           reviewer={reviewer}
+          availableTags={availableTags}
           onClose={() => setOpen(false)}
           onReviewerMissing={onReviewerMissing}
           onSubmit={(body) => {
@@ -290,6 +320,7 @@ export function TurnAnnotationWidget({
           sessionTs={sessionTs}
           turn={turn}
           reviewer={reviewer}
+          availableTags={availableTags}
           onClose={() => setEditTarget(null)}
           onReviewerMissing={onReviewerMissing}
           onSubmit={(body) => {
@@ -314,6 +345,7 @@ interface TurnAnnotationFormProps {
   onReviewerMissing: () => void;
   onSubmit: (body: TurnFeedbackPost) => void;
   supersedes?: TurnAnnotationEntry;
+  availableTags: TurnAnnotationEntry["tag"][];
 }
 
 function TurnAnnotationForm({
@@ -327,10 +359,11 @@ function TurnAnnotationForm({
   onReviewerMissing,
   onSubmit,
   supersedes,
+  availableTags,
 }: TurnAnnotationFormProps) {
-  const [tag, setTag] = useState<TurnAnnotationEntry["tag"]>(
-    supersedes?.tag ?? "note",
-  );
+  const initialTag: TurnAnnotationEntry["tag"] =
+    supersedes?.tag ?? availableTags[0] ?? "note";
+  const [tag, setTag] = useState<TurnAnnotationEntry["tag"]>(initialTag);
   const [note, setNote] = useState(supersedes?.note ?? "");
   return (
     <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
@@ -344,10 +377,11 @@ function TurnAnnotationForm({
             value={tag}
             onChange={(e) => setTag(e.target.value as TurnAnnotationEntry["tag"])}
           >
-            <MenuItem value="note">note</MenuItem>
-            <MenuItem value="coach_good">coach_good</MenuItem>
-            <MenuItem value="coach_problem">coach_problem</MenuItem>
-            <MenuItem value="student_issue">student_issue</MenuItem>
+            {availableTags.map((t) => (
+              <MenuItem key={t} value={t}>
+                {t}
+              </MenuItem>
+            ))}
           </Select>
           <TextField
             label="Note (markdown)"

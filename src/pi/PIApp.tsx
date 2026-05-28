@@ -30,7 +30,7 @@ import {
   setReviewerName,
 } from "./piApi";
 import PINavigator from "./PINavigator";
-import SessionViewer from "./SessionViewer";
+import SessionViewer, { Tabish } from "./SessionViewer";
 import DraftsAppBarWidget from "./DraftsAppBarWidget";
 import logoIcon from "/logo-white.svg";
 
@@ -149,6 +149,10 @@ export default function PIApp() {
   const [reviewer, setReviewerState] = useState<string | null>(() =>
     getReviewerName(),
   );
+  // Active tab inside SessionViewer. Lifted here so it persists across
+  // session selections — switching from one session to another keeps you on
+  // the same tab (e.g. Transcript) for easy side-by-side comparison.
+  const [sessionTab, setSessionTab] = useState<Tabish>("summary");
 
   const refreshIndex = useCallback(async () => {
     setLoadingIndex(true);
@@ -357,6 +361,8 @@ export default function PIApp() {
                 reviewer={reviewer}
                 onReviewerMissing={handleSwitchReviewer}
                 onBundleRefresh={handleBundleRefresh}
+                tab={sessionTab}
+                setTab={setSessionTab}
               />
             ) : null}
           </Box>

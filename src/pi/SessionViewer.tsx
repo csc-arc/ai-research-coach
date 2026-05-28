@@ -59,6 +59,8 @@ import {
   TurnAnnotationWidget,
 } from "./FeedbackWidgets";
 
+export type Tabish = "summary" | "transcript" | "evaluation" | "metadata";
+
 interface SessionViewerProps {
   pi: string;
   project: string;
@@ -68,9 +70,12 @@ interface SessionViewerProps {
   reviewer: string | null;
   onReviewerMissing: () => void;
   onBundleRefresh: () => void;
+  // `tab` and `setTab` are lifted into PIApp so the selection persists when
+  // the user switches between sessions in the navigator — they can keep
+  // Transcript open across multiple sessions to compare them side by side.
+  tab: Tabish;
+  setTab: (next: Tabish) => void;
 }
-
-type Tabish = "summary" | "transcript" | "evaluation" | "metadata";
 
 export default function SessionViewer({
   pi,
@@ -81,8 +86,9 @@ export default function SessionViewer({
   reviewer,
   onReviewerMissing,
   onBundleRefresh,
+  tab,
+  setTab,
 }: SessionViewerProps) {
-  const [tab, setTab] = useState<Tabish>("summary");
 
   // Fetch divergence info for the prompts SHA this session was pinned to.
   // Sessions without a pinned SHA (older than Phase A1, or local-fallback
@@ -606,9 +612,20 @@ function TranscriptTab({
         const fastEvalForCoachAfter = isAssistant
           ? fastEvalByUserTurn.get(userTurn)
           : undefined;
-        // Annotate / replay controls live on the assistant row, since
-        // they're about the coach's response to the user's input.
+        // Coach-row annotations + replay live on the assistant row; student-row
+        // annotations live on the user row. Both use the same turn number.
         const showCoachControls = isAssistant && turnIndex != null;
+        const showStudentControls = isUser && turnIndex != null;
+
+        const annotationsForTurn = (feedback?.turn_annotations || []).filter(
+          (t) => t.turn === userTurn,
+        );
+        const studentAnnotations = annotationsForTurn.filter((t) =>
+          t.tag.startsWith("student_"),
+        );
+        const coachAnnotations = annotationsForTurn.filter(
+          (t) => !t.tag.startsWith("student_"),
+        );
 
         return (
           <Box key={i}>
@@ -654,7 +671,7 @@ function TranscriptTab({
               </Box>
               <MarkdownContent content={typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)} />
 
-              {/* Turn-level annotation widget anchored on the coach response. */}
+              {/* Coach-row annotations: the coach's response to the user's input. */}
               {showCoachControls && (
                 <TurnAnnotationWidget
                   pi={pi}
@@ -664,8 +681,30 @@ function TranscriptTab({
                   turn={userTurn}
                   reviewer={reviewer}
                   onReviewerMissing={onReviewerMissing}
-                  existing={(feedback?.turn_annotations || []).filter((t) => t.turn === userTurn)}
+                  existing={coachAnnotations}
                   onSubmit={onTurnSubmit}
+                />
+              )}
+
+              {/* Student-row annotations: behavior label for this student turn. */}
+              {showStudentControls && (
+                <TurnAnnotationWidget
+                  pi={pi}
+                  project={project}
+                  student={student}
+                  sessionTs={sessionTs}
+                  turn={userTurn}
+                  reviewer={reviewer}
+                  onReviewerMissing={onReviewerMissing}
+                  existing={studentAnnotations}
+                  onSubmit={onTurnSubmit}
+                  availableTags={[
+                    "student_engaged",
+                    "student_struggling",
+                    "student_solution_seeking",
+                    "student_off_topic",
+                  ]}
+                  ctaLabel="+ annotate this student response"
                 />
               )}
             </Paper>
