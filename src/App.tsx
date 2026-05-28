@@ -334,6 +334,10 @@ function AppContent() {
           parts.push(`project_id=${encodeURIComponent(identity.projectId)}`);
           parts.push(`pi=${encodeURIComponent(identity.pi)}`);
         }
+        // Default the outputs pane closed for chat sessions. The user can
+        // still override by editing the URL (e.g. set ?hide-output-panel=0
+        // and the existing read of `=== '1'` will fall through to shown).
+        parts.push(`hide-output-panel=1`);
         newUrl = `${newUrl}?${parts.join('&')}`;
       }
       window.history.pushState({}, '', newUrl);
