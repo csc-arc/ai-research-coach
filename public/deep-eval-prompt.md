@@ -74,6 +74,9 @@ The coach is the AI Research Coach, not a human. Your job is to mirror its behav
 | `drift_from_open_thread` | Coach allowed the conversation to leave an unresolved concept |
 | `disrespect_unaddressed` | Student was dismissive or rude and the coach did not name it |
 | `no_clarification_for_ambiguity` | Student answer was ambiguous and the coach proceeded without asking what they meant |
+| `over_drove_next_step` | Coach prescribed the next concrete step when the student could have chosen it themselves (violates driver's-seat rule). Includes proposing the next sub-task, the next equation to derive, the next file to look at, etc., without first inviting the student's choice |
+| `coding_advice_without_skill_check` | Coach offered coding guidance, scaffolding, or pseudocode without first asking about the student's coding experience and calibrating accordingly |
+| `should_point_to_reading` | Coach explained material that the project resources (papers, notes, references) already cover well, when pointing the student to the specific passage and asking them to come back with questions would have been more appropriate |
 
 This is the same enum used by the fast evaluator. Do not invent new categories.
 
