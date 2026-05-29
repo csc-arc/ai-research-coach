@@ -15,7 +15,7 @@ The system is built around four prompts in `public/`. Each one drives one agent 
 
 | File | Agent | When it runs |
 |---|---|---|
-| `public/instructions-v1.md` | **Coach** — the browser-side LLM the student talks to | Every turn; injected as system prompt |
+| `public/coach-instructions.md` | **Coach** — the browser-side LLM the student talks to | Every turn; injected as system prompt |
 | `public/fast-eval-prompt.md` | **Fast evaluator** — tactical turn-by-turn signal | After every user message, before coach responds |
 | `public/deep-eval-prompt.md` | **Deep evaluator** — session-long running picture | After every assistant message (incremental) and at session end (full) |
 | `public/recorder-prompt.md` | **Recorder** — end-of-session archiver | Once, at session end |

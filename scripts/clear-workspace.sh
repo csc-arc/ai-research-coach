@@ -104,7 +104,7 @@ ALWAYS_DELETE=(
 )
 
 # These are only deleted with --including-sessions
-# (session-log.md is the RETURNING_VISITOR marker used by instructions.md)
+# (session-log.md is the RETURNING_VISITOR marker used by coach-instructions.md)
 SESSION_DELETE=(
   sessions
   cumulative-report.md

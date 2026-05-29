@@ -46,8 +46,9 @@ PROMPT_TTL_SECONDS = 5 * 60
 PROMPT_SHA_TTL_SECONDS = 30
 
 # Prompt files served from public/ and used by the eval/recorder agents. The
-# coach prompt (instructions.md or instructions-v1.md) lives in the same
-# directory but is loaded by the browser, not here, so it isn't listed.
+# coach prompt (coach-instructions.md, or the legacy legacy-instructions.md)
+# lives in the same directory but is loaded by the browser, not here, so it
+# isn't listed.
 PROMPT_FILES = {
     "fast_eval": "fast-eval-prompt.md",
     "deep_eval": "deep-eval-prompt.md",
@@ -1313,7 +1314,7 @@ async def run_recorder(
     if prompts_sha:
         metadata["prompts_sha"] = prompts_sha
         metadata["prompts"] = {
-            "coach": "instructions.md",
+            "coach": "coach-instructions.md",
             "fast_eval": PROMPT_FILES["fast_eval"],
             "deep_eval": PROMPT_FILES["deep_eval"],
             "recorder": PROMPT_FILES["recorder"],
@@ -1656,7 +1657,7 @@ async def _failure_archive(
         if active_data.get("prompts_sha"):
             metadata["prompts_sha"] = active_data["prompts_sha"]
             metadata["prompts"] = {
-                "coach": "instructions.md",
+                "coach": "coach-instructions.md",
                 "fast_eval": PROMPT_FILES["fast_eval"],
                 "deep_eval": PROMPT_FILES["deep_eval"],
                 "recorder": PROMPT_FILES["recorder"],

@@ -4,7 +4,7 @@ This directory contains the four prompts that drive the two-agent coaching pipel
 
 ## Prompt overview
 
-### `instructions-v1.md` — The Coach
+### `coach-instructions.md` — The Coach
 
 The coach is the browser-side LLM the student talks to. Its prompt is:
 
@@ -64,9 +64,9 @@ Change this prompt when PI feedback is about the *quality or content of the sess
 
 | Feedback pattern | Which prompt to change |
 |---|---|
-| "The coach keeps doing X on the same turn" (single-turn failure) | `fast-eval-prompt.md` (improve detection) or `instructions-v1.md` behavior rules (add/sharpen a rule) |
-| "The coach keeps doing X across the whole session" (pattern failure) | `deep-eval-prompt.md` (improve detection) and/or `instructions-v1.md` behavior rules |
-| "The coach is doing X wrong in a particular phase" (mode failure) | `instructions-v1.md` personality modes |
+| "The coach keeps doing X on the same turn" (single-turn failure) | `fast-eval-prompt.md` (improve detection) or `coach-instructions.md` behavior rules (add/sharpen a rule) |
+| "The coach keeps doing X across the whole session" (pattern failure) | `deep-eval-prompt.md` (improve detection) and/or `coach-instructions.md` behavior rules |
+| "The coach is doing X wrong in a particular phase" (mode failure) | `coach-instructions.md` personality modes |
 | "The session summaries are missing Y" or "the cumulative report isn't tracking Z" | `recorder-prompt.md` |
 | "The evaluation file doesn't capture W" | `deep-eval-prompt.md` |
 
@@ -83,7 +83,7 @@ If the issue is genuinely new and not covered:
 1. Add the new category string to **both** `fast-eval-prompt.md` and `deep-eval-prompt.md` tables (the strings must match exactly).
 2. Add the category to `COACH_ISSUE_CATEGORIES` or `STUDENT_RED_FLAG_CATEGORIES` in `python/ai-research-coach/ai_research_coach/recorder.py`.
 3. If it's a coach issue and you want it to count toward end-of-session recurrence, also add it to `COACH_ISSUE_RECURRENCE_CATEGORIES`.
-4. Add a corresponding behavior rule to `instructions-v1.md`.
+4. Add a corresponding behavior rule to `coach-instructions.md`.
 
 ### Step 3 — Edit, commit to `main`, wait ~5 minutes
 
@@ -104,8 +104,8 @@ Add or update an entry in `notes/coach-behavior-notes.md` in the workspace (see 
 
 - **The `coach_issues` and `student_red_flags` enum category strings**: they are shared across the two evaluator prompts and `recorder.py`. A rename must be coordinated across all three files.
 - **The `## Coach style notes` and `## Notes for PI` headings in the recorder prompt**: these are parsed programmatically.
-- **The `parameters:` line in `instructions-v1.md`**: these are substituted by the frontend before the prompt is sent. Removing a parameter that the template still references causes a session-start failure.
-- **The `recording-mode: split` line in `instructions-v1.md`**: removing this reverts to the legacy single-agent mode.
+- **The `parameters:` line in `coach-instructions.md`**: these are substituted by the frontend before the prompt is sent. Removing a parameter that the template still references causes a session-start failure.
+- **The `recording-mode: split` line in `coach-instructions.md`**: removing this reverts to the legacy single-agent mode.
 
 ---
 
@@ -123,7 +123,7 @@ The synthesizer:
 - Reads this file (`public/AGENTS.md`) verbatim as part of its system
   prompt — so updates here directly steer how feedback turns into prompt
   edits.
-- Receives the *current* contents of `instructions-v1.md`,
+- Receives the *current* contents of `coach-instructions.md`,
   `fast-eval-prompt.md`, and `deep-eval-prompt.md` as the baseline for
   diffs. It only produces a diff if at least one piece of feedback
   motivates a change to that prompt.
@@ -144,7 +144,7 @@ warning is surfaced on `/pi/drafts` next to the relevant prompt.
 Keep this list in sync with `pi_drafts.run_validators` whenever the
 prompt structure changes:
 
-1. **Coach prompt (`instructions-v1.md`):**
+1. **Coach prompt (`coach-instructions.md`):**
    - All `${...}` parameters that the original prompt contained must
      still appear in the draft. Removing one breaks the runtime
      substitution and the session start.

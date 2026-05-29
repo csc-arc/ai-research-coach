@@ -28,7 +28,7 @@ import type { DraftSet, LastSynth } from "./draftsStorage";
 const ReactDiffViewer = lazy(() => import("react-diff-viewer-continued"));
 
 const PRETTY_FILE_NAME: Record<AgentKey, string> = {
-  coach: "instructions-v1.md",
+  coach: "coach-instructions.md",
   fast_eval: "fast-eval-prompt.md",
   deep_eval: "deep-eval-prompt.md",
 };

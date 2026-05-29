@@ -23,7 +23,7 @@ import { isValidId, useStudentProject } from '../../studentProject';
 import { useProjects, type Project } from '../../useProjects';
 
 const DEFAULT_INSTRUCTIONS_URL =
-  'https://github.com/csc-arc/ai-research-coach/blob/main/public/instructions-v1.md';
+  'https://github.com/csc-arc/ai-research-coach/blob/main/public/coach-instructions.md';
 
 export interface WelcomeIdentity {
   studentId: string;

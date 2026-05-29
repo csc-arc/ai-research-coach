@@ -911,7 +911,7 @@ async def completion_proxy(body: CompletionProxyRequest, http_request: Request):
 @app.post("/api/start-session", response_model=StartSessionResponse)
 async def start_session(request: StartSessionRequest):
     """Start (or resume) a session. Replaces the old shell-script ceremony in
-    instructions.md Steps 1-4.
+    the coach prompt (coach-instructions.md) Steps 1-4.
     """
     from . import recorder
     if not validate_passcode(request.passcode):

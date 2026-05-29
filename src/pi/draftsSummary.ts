@@ -13,7 +13,7 @@ import type { DraftSet } from "./draftsStorage";
 import type { FeedbackByReviewerItem } from "./draftsApi";
 
 const FILENAME_BY_AGENT: Record<AgentKey, string> = {
-  coach: "public/instructions-v1.md",
+  coach: "public/coach-instructions.md",
   fast_eval: "public/fast-eval-prompt.md",
   deep_eval: "public/deep-eval-prompt.md",
 };
@@ -242,7 +242,7 @@ export function provenanceCommentBlock(
 export function filenameForAgent(agent: AgentKey): string {
   switch (agent) {
     case "coach":
-      return "instructions-v1.md";
+      return "coach-instructions.md";
     case "fast_eval":
       return "fast-eval-prompt.md";
     case "deep_eval":

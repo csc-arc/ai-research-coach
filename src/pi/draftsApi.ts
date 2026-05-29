@@ -158,7 +158,7 @@ export async function fetchHeadOfMainPrompts(): Promise<{
   originals: Record<AgentKey, string>;
 }> {
   const names: { agent: AgentKey; promptName: string }[] = [
-    { agent: "coach", promptName: "instructions-v1" },
+    { agent: "coach", promptName: "coach-instructions" },
     { agent: "fast_eval", promptName: "fast-eval" },
     { agent: "deep_eval", promptName: "deep-eval" },
   ];

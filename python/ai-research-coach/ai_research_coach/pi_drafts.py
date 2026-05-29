@@ -5,7 +5,7 @@ Endpoints:
   GET  /api/pi/feedback-by-reviewer     Per-reviewer head-of-chain feedback (Phase C1.5)
 
 The synthesis endpoint folds a reviewer's accumulated feedback into working
-drafts of the three editable prompts (`instructions-v1.md`,
+drafts of the three editable prompts (`coach-instructions.md`,
 `fast-eval-prompt.md`, `deep-eval-prompt.md`). Recorder edits are out of
 scope.
 
@@ -270,7 +270,7 @@ def _framing_wrapper() -> str:
         "# Your role\n\n"
         "You are an editor of three prompt files for an AI tutoring system "
         "called the AI Research Coach. The system is composed of:\n\n"
-        "- a **coach** (system prompt: `instructions-v1.md`) that talks to "
+        "- a **coach** (system prompt: `coach-instructions.md`) that talks to "
         "the student;\n"
         "- a **fast evaluator** (`fast-eval-prompt.md`) that runs after each "
         "student turn and outputs a tactical correction signal;\n"
@@ -284,9 +284,9 @@ def _framing_wrapper() -> str:
         "applies only to the recorder prompt (e.g. complaints about session "
         "summaries) should be acknowledged in `summary`/`rationale` but "
         "should NOT drive edits — leave those prompts unchanged.\n"
-        "2. Preserve every `${...}` placeholder in `instructions-v1.md`. "
+        "2. Preserve every `${...}` placeholder in `coach-instructions.md`. "
         "Removing one is a runtime error.\n"
-        "3. Preserve the YAML frontmatter lines in `instructions-v1.md`: "
+        "3. Preserve the YAML frontmatter lines in `coach-instructions.md`: "
         "`parameters:`, `suggestions-enabled:`, `recording-mode: split`.\n"
         "4. The `coach_issues` and `student_red_flags` enum strings must "
         "stay consistent between `fast-eval-prompt.md` and "
@@ -511,7 +511,7 @@ def _build_user_message(
 
     originals_section = (
         "## Originals (snapshot of head of main at draft-set creation)\n\n"
-        "### coach prompt — instructions-v1.md\n\n"
+        "### coach prompt — coach-instructions.md\n\n"
         + _quote_fenced(coach.original)
         + "\n\n### fast-eval prompt — fast-eval-prompt.md\n\n"
         + _quote_fenced(fast_eval.original)
@@ -521,7 +521,7 @@ def _build_user_message(
 
     drafts_section = (
         "## Current drafts (starting point — apply edits to these)\n\n"
-        "### coach prompt — instructions-v1.md\n\n"
+        "### coach prompt — coach-instructions.md\n\n"
         + _quote_fenced(coach.current)
         + "\n\n### fast-eval prompt — fast-eval-prompt.md\n\n"
         + _quote_fenced(fast_eval.current)

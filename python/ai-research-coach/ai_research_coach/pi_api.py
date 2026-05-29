@@ -247,11 +247,21 @@ async def get_session(
 
 
 _VALID_PROMPT_KEYS = {
-    "instructions": "instructions.md",
-    "instructions-v1": "instructions-v1.md",
+    "legacy-instructions": "legacy-instructions.md",
+    "coach-instructions": "coach-instructions.md",
     "fast-eval": recorder.PROMPT_FILES["fast_eval"],
     "deep-eval": recorder.PROMPT_FILES["deep_eval"],
     "recorder": recorder.PROMPT_FILES["recorder"],
+}
+
+# Historical filename chains for prompts that have been renamed. When
+# resolving a prompt at a pinned SHA, we try each filename newest-first so
+# that replaying a session recorded before a rename still finds the content.
+# Coach: instructions-v1.md → coach-instructions.md (renamed 2026-05).
+# Legacy: instructions.md → legacy-instructions.md (renamed 2026-05).
+_PROMPT_FILENAME_HISTORY = {
+    "coach-instructions": ("coach-instructions.md", "instructions-v1.md"),
+    "legacy-instructions": ("legacy-instructions.md", "instructions.md"),
 }
 
 
@@ -265,6 +275,32 @@ def _prompt_filename_for(key: str) -> str:
             ),
         )
     return _VALID_PROMPT_KEYS[key]
+
+
+async def _fetch_prompt_with_fallback(prompt_name: str, sha: str) -> tuple[str, str]:
+    """Fetch a prompt's content at `sha`, following the rename history chain.
+
+    Returns `(content, filename_used)`. For renamed prompts (coach, legacy) we
+    try the current filename first, then older names, so replaying a session
+    pinned to a pre-rename SHA still resolves. Raises 502 if every candidate
+    filename 404s / errors at the given SHA.
+    """
+    chain = _PROMPT_FILENAME_HISTORY.get(prompt_name)
+    if chain is None:
+        chain = (_prompt_filename_for(prompt_name),)
+    last_exc: Optional[Exception] = None
+    for filename in chain:
+        url = recorder._prompt_url_at(sha, filename)
+        try:
+            text = await recorder._fetch_prompt(url)
+            return text, filename
+        except httpx.HTTPError as e:
+            last_exc = e
+            continue
+    raise HTTPException(
+        status_code=502,
+        detail=f"Prompt fetch failed for {prompt_name} at {sha}: {last_exc}",
+    )
 
 
 def _github_headers() -> dict[str, str]:
@@ -377,7 +413,7 @@ async def get_prompts_divergence(
     """Compare a session's pinned prompts SHA against current head of main.
 
     Returns per-prompt-file divergence info: which of the three prompt files
-    (coach `instructions-v1.md`, fast-eval, deep-eval) have been modified
+    (coach `coach-instructions.md`, fast-eval, deep-eval) have been modified
     since the session ran, plus the commit subjects so the PI can decide
     whether it's worth re-running with the current prompts.
 
@@ -429,7 +465,7 @@ async def get_prompts_divergence(
             "head_sha": head_sha,
             "comparable": True,
             "prompts": {
-                "instructions-v1.md": {"modified": False, "commits": []},
+                "coach-instructions.md": {"modified": False, "commits": []},
                 "fast-eval-prompt.md": {"modified": False, "commits": []},
                 "deep-eval-prompt.md": {"modified": False, "commits": []},
             },
@@ -450,7 +486,7 @@ async def get_prompts_divergence(
     # session's pinned commit's date. (We ignore the recorder prompt for
     # divergence — the PI dashboard's drafting flow excludes it.)
     targets = {
-        "instructions-v1.md": "instructions-v1.md",
+        "coach-instructions.md": "coach-instructions.md",
         "fast-eval-prompt.md": recorder.PROMPT_FILES["fast_eval"],
         "deep-eval-prompt.md": recorder.PROMPT_FILES["deep_eval"],
     }
@@ -501,7 +537,8 @@ async def get_prompt_at_sha(
     """Return the raw content of a prompt at `sha` (use the literal string
     `live` for head-of-main)."""
     _validate_pi_passcode(x_pi_passcode, passcode)
-    filename = _prompt_filename_for(prompt_name)
+    # Validate the key up front (404s on unknown names) before fetching.
+    _prompt_filename_for(prompt_name)
 
     if sha == "live":
         resolved_sha = await recorder.resolve_prompts_sha()
@@ -510,11 +547,7 @@ async def get_prompt_at_sha(
             raise HTTPException(status_code=400, detail="Bad sha format")
         resolved_sha = sha
 
-    url = recorder._prompt_url_at(resolved_sha, filename)
-    try:
-        text = await recorder._fetch_prompt(url)
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Prompt fetch failed: {e}")
+    text, filename = await _fetch_prompt_with_fallback(prompt_name, resolved_sha)
     return {"sha": resolved_sha, "filename": filename, "content": text}
 
 
@@ -631,26 +664,26 @@ async def _resolve_selector(
 async def _resolve_coach_prompt_selector(
     selector: PromptSelector, original_sha: Optional[str]
 ) -> str:
-    """Coach prompt is split between `instructions.md` and
-    `instructions-v1.md`. We resolve as-if the file is named `instructions.md`
-    by default; for `mode=sha` the caller supplies the SHA. The browser-side
-    coach uses one or the other depending on `recording-mode:`."""
+    """Resolve the coach system prompt for replay.
+
+    The active coach prompt is `coach-instructions.md` (formerly
+    `instructions-v1.md`). For `mode=original`/`mode=sha` we fetch the content
+    at the pinned SHA via `_fetch_prompt_with_fallback`, which tries the
+    current filename first and falls back to the pre-rename name for sessions
+    recorded before the rename. `mode=text` uses the supplied literal."""
     mode = selector.mode
     if mode == "text":
         if selector.value is None:
             raise HTTPException(status_code=400, detail="mode=text requires value")
         return selector.value
-    # Use instructions-v1.md by default for "original"/SHA mode (the v1
-    # prompt is what the split-recording-mode coach actually loads).
-    filename = "instructions-v1.md"
     if mode == "original":
         if not original_sha:
             raise HTTPException(
                 status_code=400,
                 detail="mode=original unavailable: prompts_sha not recorded.",
             )
-        url = recorder._prompt_url_at(original_sha, filename)
-        return await recorder._fetch_prompt(url)
+        text, _ = await _fetch_prompt_with_fallback("coach-instructions", original_sha)
+        return text
     if mode == "sha":
         if not selector.value:
             raise HTTPException(status_code=400, detail="mode=sha requires value")
@@ -659,8 +692,8 @@ async def _resolve_coach_prompt_selector(
             sha_value = await recorder.resolve_prompts_sha()
         if not re.match(r"^[0-9a-f]{7,40}$|^local:[0-9a-f]{1,40}$", sha_value):
             raise HTTPException(status_code=400, detail="Bad sha format")
-        url = recorder._prompt_url_at(sha_value, filename)
-        return await recorder._fetch_prompt(url)
+        text, _ = await _fetch_prompt_with_fallback("coach-instructions", sha_value)
+        return text
     raise HTTPException(status_code=400, detail=f"Unknown selector mode: {mode}")
 
 

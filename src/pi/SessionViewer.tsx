@@ -414,7 +414,7 @@ function MetadataTab({ bundle }: { bundle: SessionBundle }) {
               ? undefined
               : () =>
                   setPromptViewer({
-                    name: "instructions-v1",
+                    name: "coach-instructions",
                     sha: md.prompts_sha as string,
                   })
           }

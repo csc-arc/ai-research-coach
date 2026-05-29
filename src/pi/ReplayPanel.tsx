@@ -35,9 +35,10 @@ import { getActiveDraftSet, type DraftSet } from "./draftsStorage";
 type AgentKey = "coach" | "fast_eval" | "deep_eval";
 
 const PROMPT_FILE_BY_AGENT: Record<AgentKey, string> = {
-  // The PI dashboard uses instructions-v1.md (the split-recording-mode
-  // coach prompt) as the historical anchor for "coach" replays.
-  coach: "instructions-v1",
+  // The PI dashboard uses coach-instructions.md (the split-recording-mode
+  // coach prompt) as the historical anchor for "coach" replays. The backend
+  // falls back to the pre-rename instructions-v1.md for older pinned SHAs.
+  coach: "coach-instructions",
   fast_eval: "fast-eval",
   deep_eval: "deep-eval",
 };
@@ -479,7 +480,7 @@ export default function ReplayPanel({
       0,
     );
     const fileLabels = modified
-      .map(([f]) => f.replace(/\.md$/, "").replace("instructions-v1", "coach"))
+      .map(([f]) => f.replace(/\.md$/, "").replace("coach-instructions", "coach"))
       .join(", ");
     return { fileLabels, totalCommits, fileCount: modified.length };
   }, [divergence]);
