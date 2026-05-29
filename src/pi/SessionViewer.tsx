@@ -661,7 +661,12 @@ function TranscriptTab({
                     <Tooltip title="Replay this coach response">
                       <IconButton
                         size="small"
-                        onClick={() => setReplayState({ turn: userTurn })}
+                        // Capture this row's turn number (`turnIndex`) rather
+                        // than the mutable `userTurn`. `userTurn` is shared
+                        // across the whole map and, by the time this deferred
+                        // handler fires, holds the final turn count — which is
+                        // why every replay used to open on the last turn.
+                        onClick={() => turnIndex != null && setReplayState({ turn: turnIndex })}
                       >
                         <ReplayIcon fontSize="small" />
                       </IconButton>
