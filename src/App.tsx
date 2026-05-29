@@ -475,6 +475,7 @@ function AppContent() {
       sessionStart={sessionState.init?.sessionStart}
       rehydratedMessages={rehydratedChat ?? undefined}
       coachModel={sessionState.init?.coachModel}
+      projectDescription={sessionState.init?.projectDescription || undefined}
     />
   )
 

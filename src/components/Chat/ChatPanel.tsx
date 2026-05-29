@@ -1,6 +1,7 @@
 import SettingsIcon from "@mui/icons-material/Settings";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
 import { Alert, Box, IconButton, Paper, Typography } from "@mui/material";
+import { ProjectBriefPanel } from "./ProjectBriefPanel";
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AVAILABLE_MODELS as STATIC_MODELS, DEFAULT_MODEL as STATIC_DEFAULT_MODEL } from "../../chat/availableModels";
 import { createCompletionFunction } from "../../chat/createCompletionFunction";
@@ -33,6 +34,7 @@ export function AIResearchCoachChatPanel(
     sessionStart,
     rehydratedMessages,
     coachModel,
+    projectDescription,
   }: {
     instructions: string | null;
     instructionsError: string | null;
@@ -49,6 +51,9 @@ export function AIResearchCoachChatPanel(
     /** Server-supplied coach model (Phase A0). Overrides the static fallback
      * so the backend, not the client, is the source of truth. */
     coachModel?: string;
+    /** Rendered project description + resources (Markdown). When present, a
+     * collapsible "Project Brief" bar is shown above the chat. */
+    projectDescription?: string;
   }
 ) {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -291,6 +296,11 @@ Available tools:
 
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      {/* Project Brief collapsible panel */}
+      {projectDescription && (
+        <ProjectBriefPanel projectDescription={projectDescription} />
+      )}
+
       {/* Student / Project Identity Warning */}
       {needsStudentProject && (
         <Alert
