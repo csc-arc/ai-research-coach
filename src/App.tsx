@@ -183,6 +183,7 @@ interface SessionInit {
   cumulativeReport: string;
   lastSessionSummary: string;
   coachStyleNotes: string;
+  piCustomInstructions: string;
   chatLog: { role: 'user' | 'assistant'; content: string; timestamp: string }[];
   coachModel: string;
 }
@@ -288,6 +289,7 @@ function AppContent() {
             cumulativeReport: data.cumulative_report || '',
             lastSessionSummary: data.last_session_summary || '',
             coachStyleNotes: data.coach_style_notes || '',
+            piCustomInstructions: data.pi_custom_instructions || '',
             chatLog: Array.isArray(data.chat_log) ? data.chat_log : [],
             coachModel: typeof data.coach_model === 'string' ? data.coach_model : '',
           },
@@ -320,6 +322,7 @@ function AppContent() {
       cumulative_report: sessionState.init.cumulativeReport,
       last_session_summary: sessionState.init.lastSessionSummary,
       coach_style_notes: sessionState.init.coachStyleNotes,
+      pi_custom_instructions: sessionState.init.piCustomInstructions,
     };
     return processInstructions(rawTemplate, allParams);
   }, [recordingMode, sessionState, queryParams, rawTemplate]);

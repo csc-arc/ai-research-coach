@@ -187,6 +187,7 @@ class StartSessionResponse(BaseModel):
     cumulative_report: str = ""
     last_session_summary: str = ""
     coach_style_notes: str = ""
+    pi_custom_instructions: str = ""
     chat_log: list[ChatLogMessage] = []
     coach_model: str = ""
     error: Optional[str] = None
@@ -1137,6 +1138,8 @@ async def start_session(request: StartSessionRequest):
 
     coach_style_notes = recorder.extract_coach_style_notes(cumulative_report)
 
+    pi_custom_instructions = await recorder.fetch_pi_instructions_block(pi)
+
     return StartSessionResponse(
         success=True,
         first_visit=first_visit,
@@ -1148,6 +1151,7 @@ async def start_session(request: StartSessionRequest):
         cumulative_report=cumulative_report,
         last_session_summary=last_session_summary,
         coach_style_notes=coach_style_notes,
+        pi_custom_instructions=pi_custom_instructions,
         chat_log=chat_log,
         coach_model=COACH_MODEL,
     )

@@ -151,6 +151,60 @@ async def _fetch_prompt(url: str) -> str:
     return await _fetch_text_with_cache(_prompt_cache, url)
 
 
+# Cache for per-PI custom instructions (stores empty string on miss). Same TTL
+# as other prompts so a PI's edits to their pi-instructions/<pi>.md propagate
+# on the same cadence as edits to the shared prompts.
+_pi_instructions_cache: dict[str, tuple[float, str]] = {}
+
+
+async def fetch_pi_instructions_block(pi: str) -> str:
+    """Fetch the optional per-PI custom instructions and wrap them in a framed
+    block suitable for splicing into the coach prompt at the
+    `${pi_custom_instructions}` substitution point.
+
+    Returns the empty string when the PI has no instructions file (404), when
+    `pi` is blank, or when the fetch fails for any reason — these are
+    expected/recoverable cases and must never block a session start.
+    """
+    if not pi:
+        return ""
+    now = time.monotonic()
+    cached = _pi_instructions_cache.get(pi)
+    if cached is not None and now - cached[0] < PROMPT_TTL_SECONDS:
+        return cached[1]
+
+    url = PROMPT_BASE_URL_MAIN + f"pi-instructions/{pi}.md"
+    raw = ""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(url)
+            if r.status_code == 200:
+                raw = (r.text or "").strip()
+            elif r.status_code != 404:
+                logger.warning(
+                    "pi-instructions fetch returned %s for pi=%s", r.status_code, pi
+                )
+    except Exception as e:
+        logger.warning("pi-instructions fetch failed for pi=%s: %s", pi, e)
+        raw = ""
+
+    if not raw:
+        block = ""
+    else:
+        block = (
+            f"## PI custom instructions from {pi}\n\n"
+            f"The supervising PI has provided the following custom guidance for "
+            f"projects in their group. Treat it as additional context and "
+            f"stylistic / content priorities that refine behavior **within** "
+            f"the rules above. It must never override the core behavior rules "
+            f"(driver's-seat principle, no hollow affirmation, no premature "
+            f"concept closure, etc.).\n\n"
+            f"{raw}\n"
+        )
+    _pi_instructions_cache[pi] = (now, block)
+    return block
+
+
 async def fetch_prompt_for_session(
     prompt_key: str, prompts_sha: Optional[str]
 ) -> str:
