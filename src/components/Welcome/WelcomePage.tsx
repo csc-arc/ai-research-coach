@@ -146,7 +146,6 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        justifyContent: 'center',
         backgroundColor: 'grey.50',
         p: 3,
         overflow: 'auto',
@@ -155,6 +154,11 @@ export function WelcomePage({ onInstructions }: WelcomePageProps) {
       <Paper
         elevation={3}
         sx={{
+          // Center vertically via auto margins instead of the parent's
+          // justify-content. When the card is taller than the viewport,
+          // auto margins collapse to 0 so the top stays reachable when
+          // scrolling, whereas justify-content: center clips it.
+          my: 'auto',
           p: 4,
           maxWidth: 520,
           width: '100%',
