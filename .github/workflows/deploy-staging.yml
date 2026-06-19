@@ -1,0 +1,50 @@
+# Auto-deploy the staging backend on every push to the `staging` branch.
+#
+# SSHes to the droplet as `deploy` and runs ~/redeploy-staging.sh, which pulls
+# the staging clone, reinstalls the package into the staging venv, restarts the
+# staging service, and health-checks port 3340.
+#
+# Prod (`main`) deploys stay MANUAL (~/redeploy.sh) by design — promotion is a
+# deliberate, observed action. This workflow only touches the staging service.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   STAGING_DEPLOY_KEY  - private half of an SSH keypair whose public half is in
+#                         deploy's ~/.ssh/authorized_keys on the droplet. Scope
+#                         it with a forced-command wrapper that only runs the
+#                         staging redeploy (see plan Workstream C2 / Risk R3).
+#   STAGING_SSH_HOST    - droplet host/IP (e.g. 159.89.91.132)
+#   STAGING_SSH_USER    - deploy
+# Optional:
+#   STAGING_SSH_KNOWN_HOSTS - output of `ssh-keyscan <host>` to pin the host key.
+name: Deploy staging backend
+
+on:
+  push:
+    branches: ['staging']
+  workflow_dispatch:
+
+concurrency:
+  group: 'deploy-staging'
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_DEPLOY_KEY }}" > ~/.ssh/staging_deploy
+          chmod 600 ~/.ssh/staging_deploy
+          if [ -n "${{ secrets.STAGING_SSH_KNOWN_HOSTS }}" ]; then
+            echo "${{ secrets.STAGING_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+            chmod 644 ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "${{ secrets.STAGING_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+
+      - name: Run staging redeploy on droplet
+        run: |
+          ssh -i ~/.ssh/staging_deploy \
+            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_SSH_HOST }}" \
+            'bash ~/redeploy-staging.sh'

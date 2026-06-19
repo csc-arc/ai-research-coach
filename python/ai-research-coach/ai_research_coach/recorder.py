@@ -57,16 +57,25 @@ PROMPT_FILES = {
 
 REPO_OWNER = "csc-arc"
 REPO_NAME = "ai-research-coach"
-PROMPT_BASE_URL_MAIN = (
-    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/public/"
+
+# Git ref the eval/recorder prompts are fetched from at runtime. Defaults to
+# `main` (prod behavior); staging sets ARC_PROMPTS_REF=staging so a prompt
+# change on the `staging` branch is actually exercised by the staging server.
+# This only affects the server-side prompts (fast-eval / deep-eval / recorder);
+# the coach prompt is loaded by the browser and is unaffected.
+PROMPTS_REF = os.environ.get("ARC_PROMPTS_REF", "main")
+
+PROMPT_BASE_URL = (
+    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{PROMPTS_REF}/public/"
 )
 
 
 def _prompt_url_at(sha: Optional[str], filename: str) -> str:
     """Return the raw.githubusercontent URL for `filename` at `sha`. When
-    `sha` is None or the literal string 'main', use the head of `main`.
+    `sha` is None or the literal string 'main', fall back to the configured
+    PROMPTS_REF (head of `main` in prod, the branch under test on staging).
     """
-    ref = sha if (sha and sha != "main") else "main"
+    ref = sha if (sha and sha != "main") else PROMPTS_REF
     return (
         f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{ref}/public/"
         f"{filename}"
@@ -74,9 +83,9 @@ def _prompt_url_at(sha: Optional[str], filename: str) -> str:
 
 
 # Legacy-compatible URLs used when no per-session SHA is available.
-FAST_EVAL_PROMPT_URL = PROMPT_BASE_URL_MAIN + PROMPT_FILES["fast_eval"]
-DEEP_EVAL_PROMPT_URL = PROMPT_BASE_URL_MAIN + PROMPT_FILES["deep_eval"]
-RECORDER_PROMPT_URL = PROMPT_BASE_URL_MAIN + PROMPT_FILES["recorder"]
+FAST_EVAL_PROMPT_URL = PROMPT_BASE_URL + PROMPT_FILES["fast_eval"]
+DEEP_EVAL_PROMPT_URL = PROMPT_BASE_URL + PROMPT_FILES["deep_eval"]
+RECORDER_PROMPT_URL = PROMPT_BASE_URL + PROMPT_FILES["recorder"]
 
 COACH_ISSUE_RECURRENCE_THRESHOLD = 3
 COACH_STYLE_NOTES_HEADING = "## Coach style notes"
@@ -217,7 +226,8 @@ async def fetch_prompt_for_session(
 
 
 async def resolve_prompts_sha() -> str:
-    """Return the head commit SHA of csc-arc/ai-research-coach `main`.
+    """Return the head commit SHA of csc-arc/ai-research-coach at PROMPTS_REF
+    (`main` in prod, the branch under test on staging).
 
     Cached for ~30s to avoid hammering the GitHub API on bursty session
     starts. On any failure, falls back to a sha256 content-hash of the
@@ -225,7 +235,7 @@ async def resolve_prompts_sha() -> str:
     so the system stays available when GitHub is degraded — same shape as
     the existing project_description_sha mechanism.
     """
-    cache_key = f"{REPO_OWNER}/{REPO_NAME}@main"
+    cache_key = f"{REPO_OWNER}/{REPO_NAME}@{PROMPTS_REF}"
     now = time.monotonic()
     cached = _prompts_sha_cache.get(cache_key)
     if cached is not None:
@@ -233,7 +243,9 @@ async def resolve_prompts_sha() -> str:
         if now - ts < PROMPT_SHA_TTL_SECONDS:
             return sha
 
-    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/branches/main"
+    api_url = (
+        f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/branches/{PROMPTS_REF}"
+    )
     headers = {"Accept": "application/vnd.github+json"}
     gh_token = os.environ.get("GITHUB_TOKEN")
     if gh_token:
@@ -258,7 +270,7 @@ async def resolve_prompts_sha() -> str:
     h = hashlib.sha256()
     try:
         for key in ("fast_eval", "deep_eval", "recorder"):
-            url = PROMPT_BASE_URL_MAIN + PROMPT_FILES[key]
+            url = PROMPT_BASE_URL + PROMPT_FILES[key]
             text = await _fetch_prompt(url)
             h.update(text.encode("utf-8", errors="replace"))
         digest = "local:" + h.hexdigest()[:16]

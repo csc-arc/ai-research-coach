@@ -1262,7 +1262,12 @@ async def session_status(token: str, passcode: str):
 async def _retry_unpushed_coach_sessions():
     """On startup, attempt a single git push on coach-sessions if there are
     committed-but-unpushed commits."""
-    tracker = Path.home() / "coach-sessions"
+    from . import recorder
+
+    # Honor ARC_COACH_SESSIONS_DIR so the staging service retries against its
+    # own clone rather than the prod clone (and so prod stays correct when the
+    # var is set). recorder.COACH_SESSIONS_DIR defaults to ~/coach-sessions.
+    tracker = recorder.COACH_SESSIONS_DIR
     if not tracker.exists():
         return
     try:
